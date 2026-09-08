@@ -1,0 +1,28 @@
+# Dependencies and generated output
+node_modules/
+dist/
+dist.zip
+coverage/
+*.log
+*.tsbuildinfo
+
+# Local configuration; only sanitized examples belong in source control
+.env
+.env.*
+!.env.example
+
+# Browser regression environments and reports
+.venv/
+.venv-*/
+venv/
+test-results/
+playwright-report/
+__pycache__/
+*.py[cod]
+
+# Local editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

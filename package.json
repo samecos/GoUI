@@ -1,0 +1,20 @@
+{
+  "name": "yijian-go-workspace",
+  "version": "0.1.0",
+  "description": "弈间围棋工作台：基于 WebSocket 服务的对弈、复盘与分析前端。",
+  "license": "Unlicense",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0"
+  }
+}

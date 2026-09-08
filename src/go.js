@@ -1,0 +1,5 @@
+export function emptyBoard(){return Array(361).fill(0)}
+export function group(board,index){const color=board[index],stones=new Set(),liberties=new Set(),todo=[index];while(todo.length){const p=todo.pop();if(stones.has(p))continue;stones.add(p);for(const n of neighbors(p)){if(!board[n])liberties.add(n);else if(board[n]===color&&!stones.has(n))todo.push(n)}}return {stones,liberties}}
+function neighbors(i){const x=i%19,y=Math.floor(i/19);return [x>0?i-1:-1,x<18?i+1:-1,y>0?i-19:-1,y<18?i+19:-1].filter(n=>n>=0)}
+export function play(board,index,color,previous){if(board[index])return {error:'这个位置已有棋子'};const next=[...board];next[index]=color;let captures=0;for(const n of neighbors(index)){if(next[n]&&next[n]!==color){const g=group(next,n);if(!g.liberties.size){captures+=g.stones.size;g.stones.forEach(p=>next[p]=0)}}}if(!group(next,index).liberties.size)return {error:'此处为禁入点'};if(previous&&next.every((v,i)=>v===previous[i]))return {error:'打劫需先在别处落子'};return {board:next,captures}}
+export const coordinate=i=>'ABCDEFGHJKLMNOPQRST'[i%19]+(19-Math.floor(i/19));

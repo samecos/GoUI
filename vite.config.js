@@ -2,6 +2,16 @@ import {readFile} from 'node:fs/promises';
 import {defineConfig} from 'vite';
 
 export default defineConfig({
+  server: {
+    proxy: {
+      '/ws': {target: 'ws://127.0.0.1:8090', ws: true},
+    },
+  },
+  preview: {
+    proxy: {
+      '/ws': {target: 'ws://127.0.0.1:8090', ws: true},
+    },
+  },
   plugins: [{
     name: 'include-license-notices',
     apply: 'build',

@@ -57,8 +57,19 @@ function stoneMarkup(board,numbers=new Map()) {
   }).join('');
 }
 
+function candidateMarkersMarkup() {
+  const maximumVisits=candidateVisitsMaximum();
+  if(!showCandidates||mode!=='analysis')return '';
+  return candidates().map((candidate,n)=>{
+    if(candidate.index===null)return '';
+    const x=42+candidate.index%19*32,y=42+Math.floor(candidate.index/19)*32;
+    const colors=candidateVisitColors(candidate.visits,maximumVisits);
+    return '<g class="candidate-marker" data-marker-index="'+candidate.index+'" text-anchor="middle" fill="'+colors.text+'" font-family="sans-serif"><circle cx="'+x+'" cy="'+y+'" r="15" fill="'+colors.fill+'"/><text x="'+x+'" y="'+(y-5.5)+'" font-size="9" font-weight="600">'+candidateLabel(n)+'</text><text class="candidate-rate" x="'+x+'" y="'+(y+2.5)+'" font-size="7">'+boardRateText(candidate.winRateBlack,frames[position].next)+'</text><text class="candidate-visits" x="'+x+'" y="'+(y+10)+'" font-size="6.5" font-weight="500">'+formatNumber(candidate.visits)+'</text></g>';
+  }).join('');
+}
+
 function drawBoard() {
-  const f=frames[position],maximumVisits=candidateVisitsMaximum();
+  const f=frames[position];
   let html='<defs><radialGradient id="blackStone" cx="32%" cy="25%"><stop stop-color="#525652"/><stop offset=".6" stop-color="#262a27"/><stop offset="1" stop-color="#121613"/></radialGradient><radialGradient id="whiteStone" cx="32%" cy="25%"><stop stop-color="#fff"/><stop offset=".7" stop-color="#f9f8f2"/><stop offset="1" stop-color="#d9d8ce"/></radialGradient><filter id="shadow" x="-30%" y="-30%" width="170%" height="170%"><feDropShadow dx="1" dy="2" stdDeviation="1.3" flood-opacity=".25"/></filter></defs>';
   for(let n=0;n<19;n++){
     const a=42+n*32;
@@ -73,13 +84,7 @@ function drawBoard() {
     const x=42+last.index%19*32,y=42+Math.floor(last.index/19)*32;
     html+='<rect x="'+(x-4)+'" y="'+(y-4)+'" width="8" height="8" rx="1" fill="none" stroke="'+(last.color===1?'#fff':'#647b5a')+'" stroke-width="1.6"/>';
   }
-  html+='</g><g id="candidate-markers">';
-  if(showCandidates&&mode==='analysis')candidates().forEach((candidate,n)=>{
-    if(candidate.index===null)return;
-    const x=42+candidate.index%19*32,y=42+Math.floor(candidate.index/19)*32;
-    const colors=candidateVisitColors(candidate.visits,maximumVisits);
-    html+='<g class="candidate-marker" text-anchor="middle" fill="'+colors.text+'" font-family="sans-serif"><circle cx="'+x+'" cy="'+y+'" r="15" fill="'+colors.fill+'"/><text x="'+x+'" y="'+(y-5.5)+'" font-size="9" font-weight="600">'+candidateLabel(n)+'</text><text class="candidate-rate" x="'+x+'" y="'+(y+2.5)+'" font-size="7">'+boardRateText(candidate.winRateBlack,f.next)+'</text><text class="candidate-visits" x="'+x+'" y="'+(y+10)+'" font-size="6.5" font-weight="500">'+formatNumber(candidate.visits)+'</text></g>';
-  });
+  html+='</g><g id="candidate-markers">'+candidateMarkersMarkup();
   html+='</g><g id="variation-overlay" pointer-events="none"></g><circle id="hover-stone" r="14.9" fill="url(#'+(f.next===1?'blackStone':'whiteStone')+')" opacity=".58" visibility="hidden" pointer-events="none"/>';
   for(let index=0;index<361;index++)html+='<rect class="intersection" data-index="'+index+'" x="'+(26+index%19*32)+'" y="'+(26+Math.floor(index/19)*32)+'" width="32" height="32" fill="transparent" tabindex="0" role="button" aria-label="'+coordinate(index)+(f.board[index]?(f.board[index]===1?' 黑子':' 白子'):' 落子')+'"/>';
   document.querySelector('#board').innerHTML=html;
@@ -108,16 +113,25 @@ function renderChart() {
 function render(preserveHover=false) {
   const maximumVisits=candidateVisitsMaximum();
   if(!preserveHover){cancelVariation();drawBoard();}
-  else candidates().filter(candidate=>candidate.index!==null).forEach((candidate,index)=>{
-    const marker=document.querySelector('#candidate-markers')?.children[index];
-    if(marker){
-      const colors=candidateVisitColors(candidate.visits,maximumVisits);
-      marker.setAttribute('fill',colors.text);
-      marker.querySelector('circle').setAttribute('fill',colors.fill);
-      marker.querySelector('.candidate-rate').textContent=boardRateText(candidate.winRateBlack,frames[position].next);
-      marker.querySelector('.candidate-visits').textContent=formatNumber(candidate.visits);
+  else {
+    const markers=document.querySelector('#candidate-markers');
+    const indices=showCandidates&&mode==='analysis'?candidateList():[];
+    if(JSON.stringify([...markers.children].map(marker=>Number(marker.dataset.markerIndex)))!==JSON.stringify(indices)){
+      // Only replace the decorative layer, never the pointer targets or preview.
+      markers.innerHTML=candidateMarkersMarkup();
     }
-  });
+    candidates().filter(candidate=>candidate.index!==null).forEach((candidate,index)=>{
+      const marker=markers.children[index];
+      if(marker){
+        const colors=candidateVisitColors(candidate.visits,maximumVisits);
+        marker.setAttribute('fill',colors.text);
+        marker.querySelector('circle').setAttribute('fill',colors.fill);
+        marker.querySelector('text').textContent=candidateLabel(candidates().indexOf(candidate));
+        marker.querySelector('.candidate-rate').textContent=boardRateText(candidate.winRateBlack,frames[position].next);
+        marker.querySelector('.candidate-visits').textContent=formatNumber(candidate.visits);
+      }
+    });
+  }
   renderSettings();
   renderCandidateControl();
   const f=frames[position],root=snapshot?.analysis?.root,rate=root?.winRateBlack;
@@ -142,7 +156,9 @@ function renderTab(preserveHover=false) {
   if(!preserveHover)cancelVariation();
   const el=document.querySelector('#tab-content'),maximumVisits=candidateVisitsMaximum();
   document.querySelector('#candidate-count').textContent=candidates().length;
-  if(preserveHover){
+  const rows=[...el.querySelectorAll('.candidate-row')];
+  const sameCandidates=JSON.stringify(rows.map(row=>row.dataset.candidate))===JSON.stringify(candidates().map(candidate=>String(candidate.index??'pass')));
+  if(preserveHover&&(selectedTab==='history'||sameCandidates)){
     if(selectedTab==='candidates')document.querySelectorAll('.candidate-row').forEach((row,index)=>{
       const candidate=candidates()[index];
       const colors=candidateVisitColors(candidate.visits,maximumVisits),rank=row.querySelector('.rank');
@@ -158,12 +174,27 @@ function renderTab(preserveHover=false) {
     el.innerHTML='<div class="history-list">'+(moves.length?moves.map((move,index)=>'<button data-jump="'+(index+1)+'" class="'+(position===index+1?'current':'')+'"><span>'+(index+1)+'</span><span>'+(move.color===1?'●':'○')+'</span><b>'+pointLabel(move.index)+'</b></button>').join(''):'<p class="empty">落子后将在这里显示棋谱记录。</p>')+'</div>';
     return;
   }
-  el.innerHTML='<div class="table-heading"><span>选点</span><span>黑方胜率</span><span>目差</span><span>访问量</span></div>'+
+  const markup='<div class="table-heading"><span>选点</span><span>黑方胜率</span><span>目差</span><span>访问量</span></div>'+
     (candidates().length?'<div class="candidate-list">'+candidates().map((candidate,n)=>{
       const colors=candidateVisitColors(candidate.visits,maximumVisits);
       return '<button class="candidate-row" data-candidate="'+(candidate.index??'pass')+'"><span><b class="rank" style="background-color:'+colors.fill+';color:'+colors.text+'">'+candidateLabel(n)+'</b><strong>'+pointLabel(candidate.index)+'</strong>'+(n===0?'<em>首选</em>':'')+'</span><b>'+rateText(candidate.winRateBlack)+'</b><span>'+scoreText(candidate.scoreLeadBlack)+'</span><span>'+formatNumber(candidate.visits)+'</span></button>';
     }).join('')+'</div>':'<p class="empty analysis-empty">当前局面暂无推荐选点。连接可用算力并开始分析后显示。</p>')+
-    '<div class="variation" data-variation-region><span>参考变化</span><p id="variation-status" role="status">悬停候选点，预览已有变化</p><small>停留 300ms 后读取当前搜索图</small></div>';
+    '<div class="variation" data-variation-region><span>参考变化</span><p id="variation-status" role="status">悬停候选点，预览已有变化</p><small>停留 300ms 后读取，持续悬停自动更新</small></div>';
+  if(!preserveHover){el.innerHTML=markup;return;}
+  const scrollTop=el.querySelector('.candidate-list')?.scrollTop??0;
+  const template=document.createElement('template');template.innerHTML=markup;
+  const nextRows=[...template.content.querySelectorAll('.candidate-row')];
+  // Keep rows in the same slots stable when other candidates change.
+  rows.forEach((row,index)=>{
+    const next=nextRows[index];
+    if(next&&row.dataset.candidate===next.dataset.candidate){
+      row.innerHTML=next.innerHTML;next.replaceWith(row);
+    }else if(row===hoverTarget)cancelVariation();
+  });
+  const region=el.querySelector('[data-variation-region]');
+  if(region)template.content.querySelector('[data-variation-region]').replaceWith(region);
+  el.replaceChildren(template.content);
+  const list=el.querySelector('.candidate-list');if(list)list.scrollTop=scrollTop;
 }
 
 function renderConnection() {
@@ -201,7 +232,7 @@ function renderConnection() {
 function acceptSnapshot(next) {
   const previous=snapshot;
   if(previous&&previous.sessionId!==next.sessionId)rates.clear();
-  const preserveHover=Boolean(previous&&previous.generation===next.generation&&previous.position===next.position&&JSON.stringify(previous.board)===JSON.stringify(next.board)&&JSON.stringify(candidates(previous).map(candidate=>candidate.index))===JSON.stringify(candidates(next).map(candidate=>candidate.index)));
+  const preserveHover=Boolean(previous&&previous.sessionId===next.sessionId&&previous.generation===next.generation&&previous.position===next.position&&previous.toPlay===next.toPlay&&JSON.stringify(previous.board)===JSON.stringify(next.board));
   snapshot=next;moves=next.moves;position=next.position;
   settings={...settings,...next.settings};
   if(!previous||JSON.stringify(previous.moves)!==JSON.stringify(moves))frames=replayFrames(moves);
@@ -248,10 +279,21 @@ function renderSettings() {
 }
 function dialog(html) { document.querySelector('#dialog').innerHTML=html;document.querySelector('#dialog').showModal(); }
 
+function playTarget(target) {
+  stop();void mutate('play',{index:candidateIndex(target.dataset.index??target.dataset.candidate),color:frames[position].next});
+}
+// Send mouse moves on press: a live analysis render can replace the target
+// before release, causing the browser's later click to miss the intersection.
+document.addEventListener('pointerdown',event=>{
+  if(event.pointerType!=='mouse'||event.button!==0)return;
+  const target=event.target.closest('[data-index],[data-candidate]');
+  if(target)playTarget(target);
+});
 document.addEventListener('click',event=>{
   const button=event.target.closest('button,[data-index]');if(!button)return;
   if(button.dataset.index!==undefined||button.dataset.candidate!==undefined){
-    stop();void mutate('play',{index:candidateIndex(button.dataset.index??button.dataset.candidate),color:frames[position].next});
+    // Touch, keyboard and assistive activation retain click semantics.
+    if(!(event.pointerType==='mouse'&&event.detail>0))playTarget(button);
   }
   if(button.dataset.step){stop();void jump({first:0,back:Math.max(0,position-1),forward:Math.min(moves.length,position+1),last:moves.length}[button.dataset.step]);}
   if(button.dataset.jump){stop();void jump(Number(button.dataset.jump));}
@@ -326,8 +368,9 @@ document.querySelector('#file').onchange=async event=>{
   }catch(error){toast(error.message);}finally{event.target.value='';}
 };
 
+let variationMarkup=null;
 const variationHover=createVariationHover({
-  onPending:()=>setVariationStatus('正在读取已有变化…'),
+  onPending:({refreshing})=>{if(!refreshing)setVariationStatus('正在读取已有变化…');},
   onResult:(result,payload)=>{
     if(result.available===false){setVariationStatus('当前搜索图暂无该点的后续变化');return;}
     if(payload.generation!==snapshot?.generation)return;
@@ -336,7 +379,11 @@ const variationHover=createVariationHover({
       document.querySelector('#position-stones').setAttribute('visibility','hidden');
       document.querySelector('#candidate-markers').setAttribute('visibility','hidden');
       document.querySelector('#hover-stone').setAttribute('visibility','hidden');
-      document.querySelector('#variation-overlay').innerHTML=stoneMarkup(preview.board,new Map(preview.stones.map(move=>[move.index,move.number])));
+      const markup=stoneMarkup(preview.board,new Map(preview.stones.map(move=>[move.index,move.number])));
+      if(markup!==variationMarkup){
+        document.querySelector('#variation-overlay').innerHTML=markup;
+        variationMarkup=markup;
+      }
       setVariationStatus(result.moves.length?result.moves.map((move,index)=>(index+1)+'. '+(move.color===1?'●':'○')+' '+pointLabel(move.index)).join(' → '):'暂无后续变化');
     }catch(error){setVariationStatus(error.message);}
   },
@@ -344,7 +391,7 @@ const variationHover=createVariationHover({
 });
 function setVariationStatus(text) { const el=document.querySelector('#variation-status');if(el)el.textContent=text; }
 function cancelVariation() {
-  variationHover.cancel();hoverTarget=null;
+  variationHover.cancel();hoverTarget=null;variationMarkup=null;
   document.querySelector('#variation-overlay')?.replaceChildren();
   document.querySelector('#position-stones')?.removeAttribute('visibility');
   document.querySelector('#candidate-markers')?.removeAttribute('visibility');
@@ -376,7 +423,7 @@ document.addEventListener('keydown',event=>{
   if(event.code==='Space'){event.preventDefault();autoplay();}
   if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();stop();void jump(Math.max(0,Math.min(moves.length,position+(event.key==='ArrowRight'?1:-1))));}
 });
-const endpoint=import.meta.env.VITE_ENGINE_WS_URL||((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':8090/ws');
+const endpoint=import.meta.env.VITE_ENGINE_WS_URL||((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
 session=new EngineSession({url:endpoint,storage,onSnapshot:acceptSnapshot,onNotice:toast,onStatus:status=>{
   connectionStatus=status;
   if(status!=='ready'&&status!=='connected'){cancelVariation();stop();}

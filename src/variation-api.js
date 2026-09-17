@@ -8,7 +8,7 @@ let provider = async () => ({ available: false, moves: [] });
 export function configureVariationProvider(next) { provider = next; }
 export function requestVariation(request, options) { return provider(request, options); }
 
-export function createVariationHover({ request = requestVariation, onResult, onPending = () => {}, onError = () => {}, delay = 300 }) {
+export function createVariationHover({ request = requestVariation, onResult, onPending = () => {}, onError = () => {}, delay = 300, refreshInterval = 1000 }) {
   let timer, controller, generation = 0;
   function cancel() {
     clearTimeout(timer);
@@ -19,17 +19,24 @@ export function createVariationHover({ request = requestVariation, onResult, onP
   function schedule(payload) {
     cancel();
     const current = generation;
-    timer = setTimeout(async () => {
+    async function fetchVariation(refreshing = false) {
       controller = new AbortController();
       const { signal } = controller;
-      onPending();
       try {
+        onPending({refreshing});
         const result = await request(payload, { signal });
         if (current === generation && !signal.aborted) onResult(result, payload);
       } catch (error) {
         if (current === generation && !signal.aborted) onError(error);
+      } finally {
+        // Wait for completion before scheduling again: slow responses never overlap.
+        if (current === generation && !signal.aborted) {
+          controller = undefined;
+          timer = setTimeout(() => fetchVariation(true), refreshInterval);
+        }
       }
-    }, delay);
+    }
+    timer = setTimeout(() => fetchVariation(), delay);
   }
   return { schedule, cancel };
 }

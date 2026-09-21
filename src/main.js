@@ -4,6 +4,7 @@ import {emptyBoard, coordinate} from './go.js';
 import {replayFrames, previewVariation, candidatePercentage, visibleCandidates, candidateLabel, maximumCandidateVisits, candidateVisitColors} from './board-view.js';
 import {parseSGF, exportSGF} from './sgf.js';
 import {EngineSession} from './engine-session.js';
+import {setupWorkspaceResize} from './workspace-layout.js';
 
 const icons={board:'▦',chart:'↗',folder:'▱',settings:'⚙',chevron:'⌄',back:'←',forward:'→',first:'⇤',last:'⇥',play:'▶',pause:'Ⅱ',download:'↓',upload:'↑',expand:'⤢',undo:'↶',plus:'＋'};
 const icon=key=>'<span class="icon" aria-hidden="true">'+(icons[key]||key)+'</span>';
@@ -24,24 +25,62 @@ let candidatePercent=candidatePercentage(preferences.candidatePercent);
 let moves=[],position=0,showCandidates=preferences.showCandidates,showNumbers=preferences.showNumbers,selectedTab='candidates',mode='analysis',timer=null;
 let settings={...readLocal('yijian-players',{black:'玩家 1',white:'玩家 2'}),komi:7.5,rules:'chinese'};
 let frames=[{board:emptyBoard(),captures:[0,0],next:1}],snapshot=null,session,busy=false,connectionStatus='connecting',genmoveController=null;
-let hoverTarget=null,toastTimer;
+let hoverTarget=null,toastTimer,scrubbing=false;
 const rates=new Map();
 const ruleNames={chinese:'中国规则'};
 
 document.querySelector('#app').innerHTML=`
-<aside class="rail"><a class="brand" href="#" aria-label="弈间首页"><span class="brand-mark">弈</span></a><div class="rail-nav"><button class="rail-button active" data-nav="analysis" aria-label="分析棋局">${icon('board')}</button><button class="rail-button" data-nav="play" aria-label="自由对弈">${icon('chart')}</button><button class="rail-button" id="library" aria-label="导入棋谱">${icon('folder')}</button></div><button class="rail-button rail-bottom" id="settings" aria-label="偏好设置">${icon('settings')}</button><div class="avatar">弈</div></aside>
-<div class="workspace"><header><div class="wordmark">弈间<span>YIJIAN</span></div><div class="breadcrumb">工作台 <span>/</span> <strong>棋局分析</strong></div><div class="header-right"><span class="local-dot" id="connection-dot"></span> <span id="connection-status">连接中</span> <span class="header-divider"></span><a href="#" id="help">使用指南 ↗</a></div></header>
-<main><section class="page-title"><div><div class="eyebrow">YOUR SPACE TO THINK</div><h1>每一手，都值得推敲<span>。</span></h1><p>在黑白之间，找到更好的下一步。</p></div><div class="title-actions"><button class="button" id="import">${icon('upload')} 导入棋谱</button><button class="button primary" id="new">${icon('plus')} 重开棋局</button></div></section>
-<section class="dashboard"><div class="board-column"><div class="board-card"><div class="board-top"><div class="segmented"><button class="selected" data-mode="analysis">分析棋局</button><button data-mode="play">自由对弈</button></div><span class="game-meta">19 路 <i>·</i> 贴目 7.5 <i>·</i> 中国规则</span><button class="bare" id="expand" aria-label="放大棋盘">${icon('expand')}</button></div>
-<div class="players"><div class="player"><span class="stone black"></span><div><strong><span id="black-player" class="player-name">玩家 1</span> <span>执黑</span></strong><small>提子 <b id="black-captures">0</b></small></div></div><div class="turn-label"><span class="pulse-dot"></span><span id="turn">黑方行棋</span></div><div class="player white-player"><div><strong><span id="white-player" class="player-name">玩家 2</span> <span>执白</span></strong><small>提子 <b id="white-captures">0</b></small></div><span class="stone white"></span></div></div>
-<div class="board-wrap"><svg id="board" viewBox="0 0 660 660" role="group" aria-label="19路围棋棋盘"></svg></div>
-<div class="board-caption"><span><span class="key-dot"></span> 点击交叉点落子</span><span id="last-move"></span></div><div class="playback"><div class="step-counter">第 <strong id="move-count">0</strong> 手 <span id="total-count">/ 0</span></div><div class="playback-buttons"><button data-step="first" aria-label="回到开局">${icon('first')}</button><button data-step="back" aria-label="上一手">${icon('back')}</button><button id="autoplay" aria-label="自动复盘">${icon('play')}</button><button data-step="forward" aria-label="下一手">${icon('forward')}</button><button data-step="last" aria-label="最新一手">${icon('last')}</button></div><button class="bare undo" id="undo">${icon('undo')} 悔棋</button></div></div>
-<div class="board-options"><label><input type="checkbox" id="candidates" checked>显示候选点</label><label><input type="checkbox" id="numbers">显示手数</label><button class="bare" id="genmove">AI 落子</button><button class="bare" id="pass">停一手</button><button class="bare" id="clear-board">清枰</button><button class="bare export" id="export">${icon('download')} 导出 SGF</button></div><div class="candidate-control"><div class="candidate-control-heading"><label for="candidate-percent">候选点显示比例</label><output id="candidate-percent-value" for="candidate-percent">10%</output><span id="candidate-visible-count">选取 0 / 0 个</span></div><input type="range" id="candidate-percent" min="0" max="100" step="1" value="10" aria-describedby="candidate-percent-hint"><p id="candidate-percent-hint">按引擎候选点总数计算，向上取整；最少 3 个，最多 30 个，不足 3 个时显示全部。</p></div></div>
-<aside class="analysis-column"><section class="panel engine-panel"><div class="panel-heading"><h2><span class="green-spark">✳</span> AI 分析</h2><span class="connection-badge" id="engine-badge">等待连接</span></div><div class="engine-info"><div><strong>引擎分析 <span id="analysis-status">尚未连接</span></strong><p id="engine-description">正在连接围棋服务</p></div><button id="analysis-toggle" aria-label="开始分析">${icon('pause')}</button></div><div class="engine-stats"><div><small>搜索访问量</small><b><span id="engine-visits">0</span> <span>visits</span></b></div><div><small>搜索速度</small><b><span id="engine-speed">0</span> <span>visits/s</span></b></div></div></section>
-<section class="panel evaluation"><div class="panel-heading"><h2>局势评估</h2><span class="muted">黑方视角</span></div><div class="win-heading"><div><span>黑方胜率</span><strong id="win-rate">—</strong></div><div class="lead"><span>预计目差</span><b id="score">—</b></div></div><div class="win-bar"><div id="black-bar"></div></div><div class="bar-labels"><span>● 黑 <b id="black-percent">—</b></span><span>○ 白 <b id="white-percent">—</b></span></div><div class="chart-title">胜率走势<span>当前第 <b id="chart-position">0</b> 手</span></div><div class="chart-legend"><span><i class="black-line"></i>黑棋 <b id="chart-black"></b></span><span><i class="white-line"></i>白棋 <b id="chart-white"></b></span><small>已分析的局面</small></div><div id="chart"></div><div class="chart-axis"><span>开局</span><span>手数</span><span id="chart-end">0</span></div></section>
-<section class="panel recommendation"><div class="analysis-tabs"><button class="active" data-tab="candidates">推荐选点 <span id="candidate-count">0</span></button><button data-tab="history">落子记录</button></div><div id="tab-content"></div><div class="analysis-note">${icon('✧')} 在棋盘上选择落点，探索后续变化。</div></section>
-<section class="quiet-card"><span>棋</span><div><strong>落子有声，思考无界。</strong><p>让每一次复盘，成为下一局的进步。</p></div></section></aside></section>
-<footer><span><span class="local-dot"></span> <span id="session-note">连接后由服务保留会话；导出 SGF 长期保存</span></span><span>弈间 YIJIAN <i>·</i> 专注每一步</span><span>← → 逐手复盘 <kbd>Space</kbd> 播放 / 暂停</span></footer></main></div><input type="file" id="file" accept=".sgf" hidden><div id="toast" role="status"></div><dialog id="dialog"></dialog>`;
+<aside class="rail" aria-label="工作台工具">
+  <a class="brand" href="#" aria-label="弈间首页"><span class="brand-mark">弈</span><span class="brand-caption">YIJIAN</span></a>
+  <nav class="rail-nav" aria-label="棋局模式">
+    <button class="rail-button active" data-nav="analysis" aria-label="分析棋局">${icon('board')}<span>分析棋局</span></button>
+    <button class="rail-button" data-nav="play" aria-label="自由对弈">${icon('chart')}<span>自由对弈</span></button>
+  </nav>
+  <div class="rail-group"><span class="rail-label">棋谱</span>
+    <button class="rail-button" id="new">${icon('plus')}<span>重开棋局</span></button>
+    <button class="rail-button" id="import">${icon('upload')}<span>导入棋谱</span></button>
+    <button class="rail-button" id="export">${icon('download')}<span>导出 SGF</span></button>
+  </div>
+  <div class="rail-group"><span class="rail-label">落子</span>
+    <button class="rail-button" id="genmove">AI 落子</button>
+    <button class="rail-button" id="pass">${icon('◯')}<span>停一手</span></button>
+    <button class="rail-button" id="clear-board">${icon('◇')}<span>清枰</span></button>
+  </div>
+  <button class="rail-button rail-bottom" id="settings" aria-label="偏好设置">${icon('settings')}<span>偏好设置</span></button>
+  <span class="rail-signature">一枰 · 一境</span>
+</aside>
+<div class="workspace">
+  <header><div class="wordmark">弈间<span>YIJIAN</span></div><h1 class="breadcrumb">工作台 <span>/</span> <strong>棋局分析</strong></h1><div class="header-right"><span class="local-dot" id="connection-dot"></span><span id="connection-status" role="status">连接中</span><span class="header-divider"></span><a href="#" id="help">使用指南 ↗</a></div></header>
+  <main><section class="dashboard" aria-label="围棋工作台">
+    <div class="board-column"><section class="board-card" aria-label="棋盘与复盘">
+      <div class="board-top"><div class="segmented"><button class="selected" data-mode="analysis">分析棋局</button><button data-mode="play">自由对弈</button></div><span class="game-meta">19 路 · 贴目 7.5 · 中国规则</span><button class="bare" id="expand" aria-label="放大棋盘" aria-pressed="false" title="专注棋盘">${icon('expand')}</button></div>
+      <div class="players"><div class="player"><span class="stone black" aria-hidden="true"></span><div><strong><span id="black-player" class="player-name">玩家 1</span><span>执黑</span></strong><small>提子 <b id="black-captures">0</b></small></div></div><div class="turn-label"><span class="pulse-dot"></span><span id="turn">黑方行棋</span></div><div class="player white-player"><div><strong><span id="white-player" class="player-name">玩家 2</span><span>执白</span></strong><small>提子 <b id="white-captures">0</b></small></div><span class="stone white" aria-hidden="true"></span></div></div>
+      <div class="board-stage"><div class="board-wrap"><svg id="board" viewBox="0 0 660 660" role="group" aria-label="19路围棋棋盘"></svg></div></div>
+      <div class="board-caption"><span><span class="key-dot"></span> 点击落子 · 悬停候选点预览变化</span><span id="last-move"></span></div>
+      <div class="board-options"><label><input type="checkbox" id="candidates" checked>显示候选点</label><label><input type="checkbox" id="numbers">显示手数</label><span>19 × 19</span></div>
+    </section></div>
+    <div id="workspace-divider" role="separator" tabindex="0" aria-label="调整分析栏宽度" aria-orientation="vertical" aria-controls="analysis-panel" title="拖动调整宽度，双击恢复；方向键微调"></div>
+    <aside class="analysis-column" id="analysis-panel" aria-label="AI 分析">
+      <section class="panel engine-panel"><div class="panel-heading"><h2><span class="green-spark" aria-hidden="true">✳</span> AI 分析</h2><span class="connection-badge" id="engine-badge">等待连接</span></div><div class="engine-info"><div><strong>引擎分析 <span id="analysis-status">尚未连接</span></strong><p id="engine-description">正在连接围棋服务</p></div><button id="analysis-toggle" aria-label="开始分析">${icon('play')}<span>开始分析</span></button></div><div class="engine-stats"><div><small>搜索访问量</small><b><span id="engine-visits">0</span><span>visits</span></b></div><div><small>搜索速度</small><b><span id="engine-speed">0</span><span>visits/s</span></b></div></div></section>
+      <section class="panel evaluation"><div class="panel-heading"><h2>局势评估</h2><span class="muted">黑方视角</span></div><div class="win-heading"><div><span>黑方胜率</span><strong id="win-rate">—</strong></div><div class="lead"><span>预计目差</span><b id="score">—</b></div></div><div class="win-bar"><div id="black-bar"></div></div><div class="bar-labels"><span>● 黑 <b id="black-percent">—</b></span><span>○ 白 <b id="white-percent">—</b></span></div></section>
+      <section class="panel recommendation"><div class="analysis-tabs" role="tablist" aria-label="分析详情"><button class="active" id="tab-candidates" role="tab" aria-selected="true" aria-controls="tab-content" data-tab="candidates">推荐选点 <span id="candidate-count">0</span></button><button id="tab-chart" role="tab" aria-selected="false" aria-controls="chart-section" tabindex="-1" data-tab="chart">胜率走势</button><button id="tab-history" role="tab" aria-selected="false" aria-controls="tab-content" tabindex="-1" data-tab="history">落子记录</button></div>
+        <div id="tab-content" role="tabpanel" aria-labelledby="tab-candidates" tabindex="0"></div>
+        <div id="chart-section" role="tabpanel" aria-labelledby="tab-chart" tabindex="0" hidden><div class="chart-title">胜率走势<span>当前第 <b id="chart-position">0</b> 手</span></div><div class="chart-legend"><span><i class="black-line"></i>黑棋 <b id="chart-black"></b></span><span><i class="white-line"></i>白棋 <b id="chart-white"></b></span></div><div id="chart"></div><div class="chart-axis"><span>开局</span><span>手数</span><span id="chart-end">0</span></div><p class="chart-hint">仅显示已分析的局面，空缺表示尚未分析。</p></div>
+        <div class="candidate-control"><div class="candidate-control-heading"><label for="candidate-percent">候选点显示</label><output id="candidate-percent-value" for="candidate-percent">10%</output><span id="candidate-visible-count">选取 0 / 0 个</span></div><input type="range" id="candidate-percent" aria-label="候选点显示比例" min="0" max="100" step="1" value="10" aria-describedby="candidate-percent-hint"><p id="candidate-percent-hint">按比例显示 3–30 个，不足 3 个时全部显示。</p></div>
+      </section>
+      <div class="playback"><input type="range" id="move-slider" min="0" max="0" value="0" aria-label="棋谱手数"><div class="playback-row"><div class="step-counter">第 <strong id="move-count">0</strong> 手 <span id="total-count">/ 0</span></div><div class="playback-buttons"><button data-step="first" aria-label="回到开局" title="回到开局">${icon('first')}</button><button data-step="back" aria-label="上一手" title="上一手 · ←">${icon('back')}</button><button id="autoplay" aria-label="自动复盘" title="自动复盘 · 空格">${icon('play')}</button><button data-step="forward" aria-label="下一手" title="下一手 · →">${icon('forward')}</button><button data-step="last" aria-label="最新一手" title="最新一手">${icon('last')}</button></div><button class="bare undo" id="undo">${icon('undo')} 悔棋</button></div></div>
+    </aside>
+  </section><footer><span id="session-note">导出 SGF，留存每一局</span><span>← → 逐手复盘 <kbd>Space</kbd> 播放 / 暂停</span></footer></main>
+</div><input type="file" id="file" accept=".sgf" hidden><div id="toast" role="status"></div><dialog id="dialog"></dialog>`;
+
+setupWorkspaceResize(document.querySelector('.dashboard'), document.querySelector('#workspace-divider'), storage);
+const compactLayout=window.matchMedia('(max-width: 1000px)');
+function placePlayback() {
+  const besideBoard=compactLayout.matches||document.querySelector('.dashboard').classList.contains('expanded');
+  document.querySelector(besideBoard?'.board-card':'.analysis-column').append(document.querySelector('.playback'));
+}
+compactLayout.addEventListener('change',placePlayback);
+placePlayback();
 
 function candidates(source=snapshot) { return visibleCandidates(source?.analysis?.candidates??[],candidatePercent); }
 function candidateVisitsMaximum() { return maximumCandidateVisits(snapshot?.analysis?.candidates??[]); }
@@ -52,8 +91,10 @@ function stoneMarkup(board,numbers=new Map()) {
   return board.map((color,index)=>{
     if(!color)return '';
     const x=42+index%19*32,y=42+Math.floor(index/19)*32,number=numbers.get(index);
-    return '<circle cx="'+x+'" cy="'+y+'" r="14.9" fill="url(#'+(color===1?'blackStone':'whiteStone')+')" filter="url(#shadow)"/>'+
-      (number?'<text x="'+x+'" y="'+(y+4)+'" font-size="11" text-anchor="middle" fill="'+(color===1?'#fff':'#333')+'">'+number+'</text>':'');
+    const shell=color===2?'<path d="M'+(x-9)+' '+(y-9)+'Q'+(x+1)+' '+(y-4)+' '+(x+12)+' '+(y-5)+' M'+(x-12)+' '+(y-5)+'Q'+x+' '+(y+1)+' '+(x+13)+' '+y+' M'+(x-13)+' '+y+'Q'+x+' '+(y+6)+' '+(x+12)+' '+(y+5)+' M'+(x-11)+' '+(y+5)+'Q'+x+' '+(y+10)+' '+(x+8)+' '+(y+10)+'" fill="none" stroke="#b3ad96" stroke-width=".5" opacity=".19"/>':'';
+    return '<g class="board-stone"><circle cx="'+x+'" cy="'+y+'" r="14.9" fill="url(#'+(color===1?'blackStone':'whiteStone')+')" stroke="'+(color===1?'#101414':'#c8c6bb')+'" stroke-width=".45" filter="url(#shadow)"/>'+shell+
+      '<ellipse cx="'+(x-3.8)+'" cy="'+(y-5.4)+'" rx="8.4" ry="5.8" fill="url(#stoneGlaze)" opacity="'+(color===1?'.32':'.65')+'"/>'+
+      (number?'<text x="'+x+'" y="'+(y+4)+'" font-size="11" font-weight="500" text-anchor="middle" fill="'+(color===1?'#fff':'#30352f')+'">'+number+'</text>':'')+'</g>';
   }).join('');
 }
 
@@ -70,10 +111,15 @@ function candidateMarkersMarkup() {
 
 function drawBoard() {
   const f=frames[position];
-  let html='<defs><radialGradient id="blackStone" cx="32%" cy="25%"><stop stop-color="#525652"/><stop offset=".6" stop-color="#262a27"/><stop offset="1" stop-color="#121613"/></radialGradient><radialGradient id="whiteStone" cx="32%" cy="25%"><stop stop-color="#fff"/><stop offset=".7" stop-color="#f9f8f2"/><stop offset="1" stop-color="#d9d8ce"/></radialGradient><filter id="shadow" x="-30%" y="-30%" width="170%" height="170%"><feDropShadow dx="1" dy="2" stdDeviation="1.3" flood-opacity=".25"/></filter></defs>';
+  let html=`<defs>
+    <radialGradient id="blackStone" cx="35%" cy="29%" r="72%"><stop stop-color="#555b59"/><stop offset=".28" stop-color="#323938"/><stop offset=".64" stop-color="#171d1d"/><stop offset=".9" stop-color="#080d0e"/><stop offset="1" stop-color="#343b3a"/></radialGradient>
+    <radialGradient id="whiteStone" cx="34%" cy="27%" r="74%"><stop stop-color="#fffefa"/><stop offset=".4" stop-color="#fcfbf6"/><stop offset=".72" stop-color="#eeece2"/><stop offset=".92" stop-color="#c6c7bb"/><stop offset="1" stop-color="#f1f0e6"/></radialGradient>
+    <radialGradient id="stoneGlaze"><stop stop-color="#fff" stop-opacity=".55"/><stop offset=".55" stop-color="#fff" stop-opacity=".13"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    <filter id="shadow" x="-40%" y="-35%" width="190%" height="195%" color-interpolation-filters="sRGB"><feDropShadow dx=".5" dy=".9" stdDeviation=".45" flood-color="#33240f" flood-opacity=".48"/><feDropShadow dx="1.4" dy="2.4" stdDeviation="1.65" flood-color="#382810" flood-opacity=".28"/></filter>
+  </defs>`;
   for(let n=0;n<19;n++){
     const a=42+n*32;
-    html+='<path d="M42 '+a+'H618 M'+a+' 42V618" stroke="#796948" stroke-width="'+(n===0||n===18?1.35:.75)+'" opacity=".8"/><text x="'+a+'" y="23" class="coord">'+'ABCDEFGHJKLMNOPQRST'[n]+'</text><text x="'+a+'" y="644" class="coord">'+'ABCDEFGHJKLMNOPQRST'[n]+'</text><text x="20" y="'+(a+4)+'" class="coord">'+(19-n)+'</text><text x="640" y="'+(a+4)+'" class="coord">'+(19-n)+'</text>';
+    html+='<path d="M42 '+a+'H618 M'+a+' 42V618" stroke="#564020" stroke-width="'+(n===0||n===18?1.25:.7)+'" opacity=".8"/><text x="'+a+'" y="23" class="coord">'+'ABCDEFGHJKLMNOPQRST'[n]+'</text><text x="'+a+'" y="644" class="coord">'+'ABCDEFGHJKLMNOPQRST'[n]+'</text><text x="20" y="'+(a+4)+'" class="coord">'+(19-n)+'</text><text x="640" y="'+(a+4)+'" class="coord">'+(19-n)+'</text>';
   }
   for(const x of [3,9,15])for(const y of [3,9,15])html+='<circle cx="'+(42+x*32)+'" cy="'+(42+y*32)+'" r="3.2" fill="#5f523a"/>';
   const numbers=new Map();
@@ -140,6 +186,12 @@ function render(preserveHover=false) {
   document.querySelector('#white-captures').textContent=f.captures[1];
   document.querySelector('#move-count').textContent=position;
   document.querySelector('#total-count').textContent='/ '+moves.length;
+  const moveSlider=document.querySelector('#move-slider');
+  moveSlider.max=moves.length;
+  if(!scrubbing){
+    moveSlider.value=position;
+    moveSlider.setAttribute('aria-valuetext','第 '+position+' 手，共 '+moves.length+' 手');
+  }
   document.querySelector('#last-move').textContent=position?'上一手：'+(moves[position-1].color===1?'黑':'白')+' '+pointLabel(moves[position-1].index):'等待第一手';
   document.querySelector('#win-rate').innerHTML=Number.isFinite(rate)?(rate*100).toFixed(1)+'<small>%</small>':'—';
   document.querySelector('#black-bar').style.width=Number.isFinite(rate)?rate*100+'%':'0%';
@@ -156,6 +208,11 @@ function renderTab(preserveHover=false) {
   if(!preserveHover)cancelVariation();
   const el=document.querySelector('#tab-content'),maximumVisits=candidateVisitsMaximum();
   document.querySelector('#candidate-count').textContent=candidates().length;
+  el.hidden=selectedTab==='chart';
+  document.querySelector('#chart-section').hidden=selectedTab!=='chart';
+  document.querySelector('.candidate-control').hidden=selectedTab!=='candidates';
+  el.setAttribute('aria-labelledby','tab-'+selectedTab);
+  if(selectedTab==='chart')return;
   const rows=[...el.querySelectorAll('.candidate-row')];
   const sameCandidates=JSON.stringify(rows.map(row=>row.dataset.candidate))===JSON.stringify(candidates().map(candidate=>String(candidate.index??'pass')));
   if(preserveHover&&(selectedTab==='history'||sameCandidates)){
@@ -179,7 +236,7 @@ function renderTab(preserveHover=false) {
       const colors=candidateVisitColors(candidate.visits,maximumVisits);
       return '<button class="candidate-row" data-candidate="'+(candidate.index??'pass')+'"><span><b class="rank" style="background-color:'+colors.fill+';color:'+colors.text+'">'+candidateLabel(n)+'</b><strong>'+pointLabel(candidate.index)+'</strong>'+(n===0?'<em>首选</em>':'')+'</span><b>'+rateText(candidate.winRateBlack)+'</b><span>'+scoreText(candidate.scoreLeadBlack)+'</span><span>'+formatNumber(candidate.visits)+'</span></button>';
     }).join('')+'</div>':'<p class="empty analysis-empty">当前局面暂无推荐选点。连接可用算力并开始分析后显示。</p>')+
-    '<div class="variation" data-variation-region><span>参考变化</span><p id="variation-status" role="status">悬停候选点，预览已有变化</p><small>停留 300ms 后读取，持续悬停自动更新</small></div>';
+    '<div class="variation" data-variation-region><span>参考变化</span><p id="variation-status" role="status">悬停候选点，预览已有变化</p><small>点击候选点落子，移开鼠标返回当前局面。</small></div>';
   if(!preserveHover){el.innerHTML=markup;return;}
   const scrollTop=el.querySelector('.candidate-list')?.scrollTop??0;
   const template=document.createElement('template');template.innerHTML=markup;
@@ -218,13 +275,15 @@ function renderConnection() {
   document.querySelector('#engine-visits').textContent=formatNumber(analysis?.visits??0);
   document.querySelector('#engine-speed').textContent=ready?formatNumber(analysis?.nodesPerSecond??0):'—';
   const active=Boolean(session?.analysisIntent);
-  document.querySelector('#analysis-toggle').innerHTML=icon(active?'pause':'play');
+  document.querySelector('#analysis-toggle').innerHTML=icon(active?'pause':'play')+'<span>'+(active?'停止分析':'开始分析')+'</span>';
   document.querySelector('#analysis-toggle').setAttribute('aria-label',active?'停止分析':'开始分析');
+  document.querySelector('#analysis-toggle').classList.toggle('running',active);
   document.querySelector('#genmove').textContent=genmoveController?'取消 AI 落子':'AI 落子';
-  for(const id of ['import','library','new','pass','clear-board','analysis-toggle'])document.querySelector('#'+id).disabled=!ready||busy;
+  for(const id of ['import','new','pass','clear-board','analysis-toggle'])document.querySelector('#'+id).disabled=!ready||busy;
   document.querySelector('#undo').disabled=!ready||busy||position===0;
   document.querySelector('#genmove').disabled=!ready||(busy&&!genmoveController);
   for(const button of document.querySelectorAll('[data-step],[data-jump],#autoplay'))button.disabled=!ready||busy;
+  document.querySelector('#move-slider').disabled=!ready||busy||moves.length===0;
   for(const point of document.querySelectorAll('[data-index]'))point.setAttribute('aria-disabled',String(!ready||busy));
   for(const button of document.querySelectorAll('[data-candidate]'))button.disabled=!ready||busy;
 }
@@ -268,8 +327,8 @@ function autoplay() {
 }
 function setMode(next) {
   mode=next;
-  document.querySelectorAll('[data-mode]').forEach(button=>button.classList.toggle('selected',button.dataset.mode===next));
-  document.querySelectorAll('[data-nav]').forEach(button=>button.classList.toggle('active',button.dataset.nav===next));
+  document.querySelectorAll('[data-mode]').forEach(button=>{button.classList.toggle('selected',button.dataset.mode===next);button.setAttribute('aria-pressed',String(button.dataset.mode===next));});
+  document.querySelectorAll('[data-nav]').forEach(button=>{button.classList.toggle('active',button.dataset.nav===next);button.setAttribute('aria-pressed',String(button.dataset.nav===next));});
   document.querySelector('.breadcrumb strong').textContent=next==='analysis'?'棋局分析':'自由对弈';render();
 }
 function renderSettings() {
@@ -298,10 +357,37 @@ document.addEventListener('click',event=>{
   if(button.dataset.step){stop();void jump({first:0,back:Math.max(0,position-1),forward:Math.min(moves.length,position+1),last:moves.length}[button.dataset.step]);}
   if(button.dataset.jump){stop();void jump(Number(button.dataset.jump));}
   if(button.dataset.mode||button.dataset.nav)setMode(button.dataset.mode||button.dataset.nav);
-  if(button.dataset.tab){selectedTab=button.dataset.tab;document.querySelectorAll('[data-tab]').forEach(tab=>tab.classList.toggle('active',tab===button));renderTab();renderConnection();}
+  if(button.dataset.tab)selectAnalysisTab(button);
+});
+function selectAnalysisTab(button) {
+  selectedTab=button.dataset.tab;
+  document.querySelectorAll('[data-tab]').forEach(tab=>{
+    tab.classList.toggle('active',tab===button);
+    tab.setAttribute('aria-selected',String(tab===button));
+    tab.tabIndex=tab===button?0:-1;
+  });
+  renderTab();renderConnection();
+}
+document.querySelector('.analysis-tabs').addEventListener('keydown',event=>{
+  if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  event.preventDefault();
+  const tabs=[...document.querySelectorAll('[data-tab]')],index=tabs.indexOf(document.activeElement);
+  const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+  tabs[next].focus();selectAnalysisTab(tabs[next]);
 });
 document.querySelector('#board').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();event.target.dispatchEvent(new MouseEvent('click',{bubbles:true}));}});
 document.querySelector('#autoplay').onclick=autoplay;
+document.querySelector('#move-slider').oninput=event=>{
+  scrubbing=true;
+  event.target.setAttribute('aria-valuetext','第 '+event.target.value+' 手，共 '+moves.length+' 手');
+};
+document.querySelector('#move-slider').onchange=async event=>{
+  stop();
+  await jump(Number(event.target.value));
+  scrubbing=false;
+  event.target.value=position;
+  event.target.setAttribute('aria-valuetext','第 '+position+' 手，共 '+moves.length+' 手');
+};
 document.querySelector('#undo').onclick=()=>{stop();void mutate('undo');};
 document.querySelector('#pass').onclick=()=>{stop();void mutate('play',{index:null,color:frames[position].next});};
 document.querySelector('#clear-board').onclick=async()=>{stop();if(await mutate('new_game',{komi:settings.komi,rules:'chinese'})){rates.clear();render();toast('已清枰，保留双方与规则设置');}};
@@ -344,10 +430,12 @@ document.querySelector('#dialog').addEventListener('submit',async event=>{
   }
 });
 document.querySelector('#expand').onclick=()=>{
-  document.querySelector('.dashboard').classList.toggle('expanded');
-  document.querySelector('#expand').setAttribute('aria-label',document.querySelector('.dashboard').classList.contains('expanded')?'恢复布局':'放大棋盘');
+  const expanded=document.querySelector('.dashboard').classList.toggle('expanded');
+  placePlayback();
+  document.querySelector('#expand').setAttribute('aria-label',expanded?'恢复布局':'放大棋盘');
+  document.querySelector('#expand').setAttribute('aria-pressed',String(expanded));
 };
-document.querySelector('#settings').onclick=()=>dialog('<form method="dialog"><h2>棋盘偏好</h2><p>使用棋盘下方的开关显示手数与候选点，拖动滑块调整候选点显示比例（最少 3 个，最多 30 个）。偏好和双方姓名保存在当前浏览器会话中。</p><p>当前接入 19 路中国规则服务。暂未提供其他规则与让子棋谱。</p><button class="button primary">知道了</button></form>');
+document.querySelector('#settings').onclick=()=>dialog('<form method="dialog"><h2>棋盘偏好</h2><p>棋盘下方可切换候选点与手数；右侧「推荐选点」底部可调整候选点显示比例。显示偏好保存在当前浏览器会话中。</p><p>拖动棋盘与分析栏之间的分隔线可调整宽度，双击恢复默认。点击棋盘右上角可进入专注模式。</p><button class="button primary">知道了</button></form>');
 document.querySelector('#help').onclick=event=>{
   event.preventDefault();dialog('<form method="dialog"><h2>欢迎来到弈间</h2><p>连接服务后点击交叉点落子，也可选择 AI 落子。胜率、目差和候选点来自真实分析；暂无算力时显示等待状态。</p><p>方向键逐手复盘，空格自动播放；在历史位置落子会替换后续记录。悬停候选点只读取已有变化。</p><p>SGF 导入支持 19 路中国规则、无摆子、无分支的交替落子棋谱。短暂断线后会恢复服务会话；请导出 SGF 长期保存。</p><button class="button primary">开始探索</button></form>');
 };
@@ -356,7 +444,7 @@ document.querySelector('#export').onclick=()=>{
   const url=URL.createObjectURL(new Blob([sgf],{type:'application/x-go-sgf'})),link=document.createElement('a');
   link.href=url;link.download='弈间-棋局.sgf';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('棋谱已导出');
 };
-for(const id of ['import','library'])document.querySelector('#'+id).onclick=()=>document.querySelector('#file').click();
+document.querySelector('#import').onclick=()=>document.querySelector('#file').click();
 document.querySelector('#file').onchange=async event=>{
   const file=event.target.files[0];if(!file)return;
   try{

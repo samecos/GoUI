@@ -3,8 +3,10 @@ import {createVariationHover, configureVariationProvider} from './variation-api.
 import {emptyBoard, coordinate} from './go.js';
 import {replayFrames, previewVariation, candidatePercentage, visibleCandidates, candidateLabel, maximumCandidateVisits, candidateVisitColors} from './board-view.js';
 import {parseSGF, exportSGF} from './sgf.js';
+import {SgfReview} from './sgf-review.js';
 import {EngineSession} from './engine-session.js';
-import {setupWorkspaceResize} from './workspace-layout.js';
+import {setupWorkspaceResize, setupBoardSizing} from './workspace-layout.js';
+import {setupBoardInput, createTouchPreview} from './board-input.js';
 
 const icons={board:'▦',chart:'↗',folder:'▱',settings:'⚙',chevron:'⌄',back:'←',forward:'→',first:'⇤',last:'⇥',play:'▶',pause:'Ⅱ',download:'↓',upload:'↑',expand:'⤢',undo:'↶',plus:'＋'};
 const icon=key=>'<span class="icon" aria-hidden="true">'+(icons[key]||key)+'</span>';
@@ -20,12 +22,15 @@ let storage;
 try { storage=window.sessionStorage; } catch { storage=undefined; }
 function readLocal(key,fallback) { try { return JSON.parse(storage?.getItem(key)??'null')??fallback; } catch { return fallback; } }
 function saveLocal(key,value) { try { storage?.setItem(key,JSON.stringify(value)); } catch {} }
+const endpoint=import.meta.env.VITE_ENGINE_WS_URL||((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+const sgfReview=new SgfReview({storage,key:'yijian-sgf-review:'+endpoint});
 const preferences=readLocal('yijian-preferences',{showCandidates:true,showNumbers:false});
 let candidatePercent=candidatePercentage(preferences.candidatePercent);
 let moves=[],position=0,showCandidates=preferences.showCandidates,showNumbers=preferences.showNumbers,selectedTab='candidates',mode='analysis',timer=null;
 let settings={...readLocal('yijian-players',{black:'玩家 1',white:'玩家 2'}),komi:7.5,rules:'chinese'};
 let frames=[{board:emptyBoard(),captures:[0,0],next:1}],snapshot=null,session,busy=false,connectionStatus='connecting',genmoveController=null;
 let hoverTarget=null,toastTimer,scrubbing=false;
+let touchInput=window.matchMedia('(pointer: coarse)').matches;
 const rates=new Map();
 const ruleNames={chinese:'中国规则'};
 
@@ -53,10 +58,11 @@ document.querySelector('#app').innerHTML=`
   <header><div class="wordmark">弈间<span>YIJIAN</span></div><h1 class="breadcrumb">工作台 <span>/</span> <strong>棋局分析</strong></h1><div class="header-right"><span class="local-dot" id="connection-dot"></span><span id="connection-status" role="status">连接中</span><span class="header-divider"></span><a href="#" id="help">使用指南 ↗</a></div></header>
   <main><section class="dashboard" aria-label="围棋工作台">
     <div class="board-column"><section class="board-card" aria-label="棋盘与复盘">
-      <div class="board-top"><div class="segmented"><button class="selected" data-mode="analysis">分析棋局</button><button data-mode="play">自由对弈</button></div><span class="game-meta">19 路 · 贴目 7.5 · 中国规则</span><button class="bare" id="expand" aria-label="放大棋盘" aria-pressed="false" title="专注棋盘">${icon('expand')}</button></div>
+      <div class="board-top"><div class="segmented"><button class="selected" data-mode="analysis">分析棋局</button><button data-mode="play">自由对弈</button></div><span class="game-meta">19 路 · 贴目 7.5 · 中国规则</span><button class="bare" id="expand" aria-label="专注棋盘" aria-pressed="false" title="专注棋盘">${icon('expand')}</button></div>
       <div class="players"><div class="player"><span class="stone black" aria-hidden="true"></span><div><strong><span id="black-player" class="player-name">玩家 1</span><span>执黑</span></strong><small>提子 <b id="black-captures">0</b></small></div></div><div class="turn-label"><span class="pulse-dot"></span><span id="turn">黑方行棋</span></div><div class="player white-player"><div><strong><span id="white-player" class="player-name">玩家 2</span><span>执白</span></strong><small>提子 <b id="white-captures">0</b></small></div><span class="stone white" aria-hidden="true"></span></div></div>
       <div class="board-stage"><div class="board-wrap"><svg id="board" viewBox="0 0 660 660" role="group" aria-label="19路围棋棋盘"></svg></div></div>
-      <div class="board-caption"><span><span class="key-dot"></span> 点击落子 · 悬停候选点预览变化</span><span id="last-move"></span></div>
+      <div id="touch-preview" class="touch-preview" hidden><div><strong id="touch-preview-target"></strong><span>再点同一点落子 · 点其他位置切换</span><p id="touch-preview-status" role="status"></p></div><button id="exit-preview" type="button">退出预览</button></div>
+      <div class="board-caption"><span><span class="key-dot"></span> <span id="board-input-hint"></span></span><span id="last-move"></span></div>
       <div class="board-options"><label><input type="checkbox" id="candidates" checked>显示候选点</label><label><input type="checkbox" id="numbers">显示手数</label><span>19 × 19</span></div>
     </section></div>
     <div id="workspace-divider" role="separator" tabindex="0" aria-label="调整分析栏宽度" aria-orientation="vertical" aria-controls="analysis-panel" title="拖动调整宽度，双击恢复；方向键微调"></div>
@@ -68,7 +74,7 @@ document.querySelector('#app').innerHTML=`
         <div id="chart-section" role="tabpanel" aria-labelledby="tab-chart" tabindex="0" hidden><div class="chart-title">胜率走势<span>当前第 <b id="chart-position">0</b> 手</span></div><div class="chart-legend"><span><i class="black-line"></i>黑棋 <b id="chart-black"></b></span><span><i class="white-line"></i>白棋 <b id="chart-white"></b></span></div><div id="chart"></div><div class="chart-axis"><span>开局</span><span>手数</span><span id="chart-end">0</span></div><p class="chart-hint">仅显示已分析的局面，空缺表示尚未分析。</p></div>
         <div class="candidate-control"><div class="candidate-control-heading"><label for="candidate-percent">候选点显示</label><output id="candidate-percent-value" for="candidate-percent">10%</output><span id="candidate-visible-count">选取 0 / 0 个</span></div><input type="range" id="candidate-percent" aria-label="候选点显示比例" min="0" max="100" step="1" value="10" aria-describedby="candidate-percent-hint"><p id="candidate-percent-hint">按比例显示 3–30 个，不足 3 个时全部显示。</p></div>
       </section>
-      <div class="playback"><input type="range" id="move-slider" min="0" max="0" value="0" aria-label="棋谱手数"><div class="playback-row"><div class="step-counter">第 <strong id="move-count">0</strong> 手 <span id="total-count">/ 0</span></div><div class="playback-buttons"><button data-step="first" aria-label="回到开局" title="回到开局">${icon('first')}</button><button data-step="back" aria-label="上一手" title="上一手 · ←">${icon('back')}</button><button id="autoplay" aria-label="自动复盘" title="自动复盘 · 空格">${icon('play')}</button><button data-step="forward" aria-label="下一手" title="下一手 · →">${icon('forward')}</button><button data-step="last" aria-label="最新一手" title="最新一手">${icon('last')}</button></div><button class="bare undo" id="undo">${icon('undo')} 悔棋</button></div></div>
+      <div class="playback"><p id="next-move" role="status" hidden></p><input type="range" id="move-slider" min="0" max="0" value="0" aria-label="棋谱手数"><div class="playback-row"><div class="step-counter">第 <strong id="move-count">0</strong> 手 <span id="total-count">/ 0</span></div><div class="playback-buttons"><button data-step="first" aria-label="回到开局" title="回到开局">${icon('first')}</button><button data-step="back" aria-label="上一手" title="上一手 · ←">${icon('back')}</button><button id="autoplay" aria-label="自动复盘" title="自动复盘 · 空格">${icon('play')}</button><button data-step="forward" aria-label="下一手" title="下一手 · →">${icon('forward')}</button><button data-step="last" aria-label="最新一手" title="最新一手">${icon('last')}</button></div><button class="bare undo" id="undo">${icon('undo')} 悔棋</button></div></div>
     </aside>
   </section><footer><span id="session-note">导出 SGF，留存每一局</span><span>← → 逐手复盘 <kbd>Space</kbd> 播放 / 暂停</span></footer></main>
 </div><input type="file" id="file" accept=".sgf" hidden><div id="toast" role="status"></div><dialog id="dialog"></dialog>`;
@@ -77,15 +83,29 @@ setupWorkspaceResize(document.querySelector('.dashboard'), document.querySelecto
 const compactLayout=window.matchMedia('(max-width: 1000px)');
 function placePlayback() {
   const besideBoard=compactLayout.matches||document.querySelector('.dashboard').classList.contains('expanded');
-  document.querySelector(besideBoard?'.board-card':'.analysis-column').append(document.querySelector('.playback'));
+  const card=document.querySelector('.board-card'),stage=document.querySelector('.board-stage');
+  const top=document.querySelector('.board-top'),players=document.querySelector('.players');
+  const options=document.querySelector('.board-options'),playback=document.querySelector('.playback');
+  if(besideBoard){
+    card.insertBefore(top,stage);
+    card.insertBefore(players,stage);
+    card.append(options,playback);
+  }else{
+    document.querySelector('header').insertBefore(top,document.querySelector('.header-right'));
+    document.querySelector('.evaluation').prepend(players);
+    document.querySelector('.analysis-column').append(playback,options);
+  }
 }
-compactLayout.addEventListener('change',placePlayback);
+if(compactLayout.addEventListener)compactLayout.addEventListener('change',placePlayback);
+else compactLayout.addListener(placePlayback);
 placePlayback();
+setupBoardSizing(document.querySelector('.board-stage'),document.querySelector('.board-wrap'),compactLayout);
 
 function candidates(source=snapshot) { return visibleCandidates(source?.analysis?.candidates??[],candidatePercent); }
 function candidateVisitsMaximum() { return maximumCandidateVisits(snapshot?.analysis?.candidates??[]); }
 function candidateList() { return candidates().map(candidate=>candidate.index).filter(index=>index!==null); }
-function positionKey(p=position) { return settings.komi+':'+settings.rules+':'+moves.slice(0,p).map(move=>move.color+','+move.index).join(';'); }
+function reviewMoves() { return sgfReview.line(moves); }
+function positionKey(p=position,line=moves) { return settings.komi+':'+settings.rules+':'+line.slice(0,p).map(move=>move.color+','+move.index).join(';'); }
 
 function stoneMarkup(board,numbers=new Map()) {
   return board.map((color,index)=>{
@@ -107,6 +127,19 @@ function candidateMarkersMarkup() {
     const colors=candidateVisitColors(candidate.visits,maximumVisits);
     return '<g class="candidate-marker" data-marker-index="'+candidate.index+'" text-anchor="middle" fill="'+colors.text+'" font-family="sans-serif"><circle cx="'+x+'" cy="'+y+'" r="15" fill="'+colors.fill+'"/><text x="'+x+'" y="'+(y-5.5)+'" font-size="9" font-weight="600">'+candidateLabel(n)+'</text><text class="candidate-rate" x="'+x+'" y="'+(y+2.5)+'" font-size="7">'+boardRateText(candidate.winRateBlack,frames[position].next)+'</text><text class="candidate-visits" x="'+x+'" y="'+(y+10)+'" font-size="6.5" font-weight="500">'+formatNumber(candidate.visits)+'</text></g>';
   }).join('');
+}
+
+function nextMoveLabel() {
+  if(!sgfReview.matches(moves,position))return '试下中 · 回退或播放返回原棋谱';
+  const next=sgfReview.next(moves,position);
+  return next?'棋谱下一手：'+(next.color===1?'黑':'白')+' '+pointLabel(next.index):'';
+}
+
+function nextMoveMarkerMarkup() {
+  const next=sgfReview.next(moves,position);
+  if(!next||next.index===null)return '';
+  const x=42+next.index%19*32,y=42+Math.floor(next.index/19)*32;
+  return '<g data-next-index="'+next.index+'" role="img" aria-label="'+nextMoveLabel()+'"><circle class="next-move-halo" cx="'+x+'" cy="'+y+'" r="17"/><circle class="next-move-ring" cx="'+x+'" cy="'+y+'" r="17"/></g>';
 }
 
 function drawBoard() {
@@ -131,16 +164,16 @@ function drawBoard() {
     html+='<rect x="'+(x-4)+'" y="'+(y-4)+'" width="8" height="8" rx="1" fill="none" stroke="'+(last.color===1?'#fff':'#647b5a')+'" stroke-width="1.6"/>';
   }
   html+='</g><g id="candidate-markers">'+candidateMarkersMarkup();
-  html+='</g><g id="variation-overlay" pointer-events="none"></g><circle id="hover-stone" r="14.9" fill="url(#'+(f.next===1?'blackStone':'whiteStone')+')" opacity=".58" visibility="hidden" pointer-events="none"/>';
+  html+='</g><g id="next-move-marker" pointer-events="none">'+nextMoveMarkerMarkup()+'</g><g id="variation-overlay" pointer-events="none"></g><circle id="touch-selection" class="touch-selection" r="16" visibility="hidden" pointer-events="none"/><circle id="hover-stone" r="14.9" fill="url(#'+(f.next===1?'blackStone':'whiteStone')+')" opacity=".58" visibility="hidden" pointer-events="none"/>';
   for(let index=0;index<361;index++)html+='<rect class="intersection" data-index="'+index+'" x="'+(26+index%19*32)+'" y="'+(26+Math.floor(index/19)*32)+'" width="32" height="32" fill="transparent" tabindex="0" role="button" aria-label="'+coordinate(index)+(f.board[index]?(f.board[index]===1?' 黑子':' 白子'):' 落子')+'"/>';
   document.querySelector('#board').innerHTML=html;
 }
 
 function renderChart() {
-  const groups=[];let current=[];
-  for(let p=0;p<=moves.length;p++){
-    const rate=rates.get(positionKey(p));
-    if(Number.isFinite(rate))current.push({x:p/Math.max(moves.length,1)*310,rate});
+  const line=reviewMoves(),groups=[];let current=[];
+  for(let p=0;p<=line.length;p++){
+    const rate=rates.get(positionKey(p,line));
+    if(Number.isFinite(rate))current.push({x:p/Math.max(line.length,1)*310,rate});
     else if(current.length){groups.push(current);current=[];}
   }
   if(current.length)groups.push(current);
@@ -152,7 +185,7 @@ function renderChart() {
     for(const point of group)html+='<circle cx="'+point.x+'" cy="'+(110-(color==='black'?point.rate:1-point.rate)*100)+'" r="2" fill="'+stroke+'"/>';
   }
   if(!groups.length)html+='<text x="155" y="62" text-anchor="middle" class="chart-empty">暂无分析结果</text>';
-  html+='<path d="M'+position/Math.max(moves.length,1)*310+' 10V110" stroke="#abb49f" stroke-dasharray="3 3"/></svg>';
+  html+='<path d="M'+Math.min(position,line.length)/Math.max(line.length,1)*310+' 10V110" stroke="#abb49f" stroke-dasharray="3 3"/></svg>';
   document.querySelector('#chart').innerHTML=html;
 }
 
@@ -178,21 +211,24 @@ function render(preserveHover=false) {
       }
     });
   }
-  renderSettings();
+  renderInputHints();renderSettings();
   renderCandidateControl();
   const f=frames[position],root=snapshot?.analysis?.root,rate=root?.winRateBlack;
   document.querySelector('#turn').textContent=snapshot?.terminal!=null?'棋局已结束':f.next===1?'黑方行棋':'白方行棋';
   document.querySelector('#black-captures').textContent=f.captures[0];
   document.querySelector('#white-captures').textContent=f.captures[1];
   document.querySelector('#move-count').textContent=position;
-  document.querySelector('#total-count').textContent='/ '+moves.length;
+  document.querySelector('#total-count').textContent='/ '+reviewMoves().length;
   const moveSlider=document.querySelector('#move-slider');
-  moveSlider.max=moves.length;
+  moveSlider.max=reviewMoves().length;
   if(!scrubbing){
     moveSlider.value=position;
-    moveSlider.setAttribute('aria-valuetext','第 '+position+' 手，共 '+moves.length+' 手');
+    moveSlider.setAttribute('aria-valuetext','第 '+position+' 手，共 '+reviewMoves().length+' 手');
   }
   document.querySelector('#last-move').textContent=position?'上一手：'+(moves[position-1].color===1?'黑':'白')+' '+pointLabel(moves[position-1].index):'等待第一手';
+  const nextMove=document.querySelector('#next-move'),nextLabel=nextMoveLabel();
+  nextMove.hidden=!nextLabel;
+  if(nextMove.textContent!==nextLabel)nextMove.textContent=nextLabel;
   document.querySelector('#win-rate').innerHTML=Number.isFinite(rate)?(rate*100).toFixed(1)+'<small>%</small>':'—';
   document.querySelector('#black-bar').style.width=Number.isFinite(rate)?rate*100+'%':'0%';
   document.querySelector('.win-bar').classList.toggle('unavailable',!Number.isFinite(rate));
@@ -200,7 +236,7 @@ function render(preserveHover=false) {
   for(const id of ['white-percent','chart-white'])document.querySelector('#'+id).textContent=rateText(Number.isFinite(rate)?1-rate:null);
   document.querySelector('#score').textContent=scoreText(root?.scoreLeadBlack);
   document.querySelector('#chart-position').textContent=position;
-  document.querySelector('#chart-end').textContent=moves.length;
+  document.querySelector('#chart-end').textContent=reviewMoves().length;
   renderChart();renderTab(preserveHover);renderConnection();
 }
 
@@ -228,7 +264,8 @@ function renderTab(preserveHover=false) {
     return;
   }
   if(selectedTab==='history'){
-    el.innerHTML='<div class="history-list">'+(moves.length?moves.map((move,index)=>'<button data-jump="'+(index+1)+'" class="'+(position===index+1?'current':'')+'"><span>'+(index+1)+'</span><span>'+(move.color===1?'●':'○')+'</span><b>'+pointLabel(move.index)+'</b></button>').join(''):'<p class="empty">落子后将在这里显示棋谱记录。</p>')+'</div>';
+    const line=reviewMoves();
+    el.innerHTML='<div class="history-list">'+(line.length?line.map((move,index)=>'<button data-jump="'+(index+1)+'" class="'+(position===index+1&&sgfReview.matches(moves,position)?'current':'')+'"><span>'+(index+1)+'</span><span>'+(move.color===1?'●':'○')+'</span><b>'+pointLabel(move.index)+'</b></button>').join(''):'<p class="empty">落子后将在这里显示棋谱记录。</p>')+'</div>';
     return;
   }
   const markup='<div class="table-heading"><span>选点</span><span>黑方胜率</span><span>目差</span><span>访问量</span></div>'+
@@ -236,7 +273,7 @@ function renderTab(preserveHover=false) {
       const colors=candidateVisitColors(candidate.visits,maximumVisits);
       return '<button class="candidate-row" data-candidate="'+(candidate.index??'pass')+'"><span><b class="rank" style="background-color:'+colors.fill+';color:'+colors.text+'">'+candidateLabel(n)+'</b><strong>'+pointLabel(candidate.index)+'</strong>'+(n===0?'<em>首选</em>':'')+'</span><b>'+rateText(candidate.winRateBlack)+'</b><span>'+scoreText(candidate.scoreLeadBlack)+'</span><span>'+formatNumber(candidate.visits)+'</span></button>';
     }).join('')+'</div>':'<p class="empty analysis-empty">当前局面暂无推荐选点。连接可用算力并开始分析后显示。</p>')+
-    '<div class="variation" data-variation-region><span>参考变化</span><p id="variation-status" role="status">悬停候选点，预览已有变化</p><small>点击候选点落子，移开鼠标返回当前局面。</small></div>';
+    '<div class="variation" data-variation-region><span>参考变化</span><p id="variation-status" role="status">'+variationIdleHint()+'</p><small id="variation-hint">'+variationHint()+'</small></div>';
   if(!preserveHover){el.innerHTML=markup;return;}
   const scrollTop=el.querySelector('.candidate-list')?.scrollTop??0;
   const template=document.createElement('template');template.innerHTML=markup;
@@ -246,7 +283,7 @@ function renderTab(preserveHover=false) {
     const next=nextRows[index];
     if(next&&row.dataset.candidate===next.dataset.candidate){
       row.innerHTML=next.innerHTML;next.replaceWith(row);
-    }else if(row===hoverTarget)cancelVariation();
+    }else if(row===hoverTarget&&!touchPreview.selection)cancelVariation();
   });
   const region=el.querySelector('[data-variation-region]');
   if(region)template.content.querySelector('[data-variation-region]').replaceWith(region);
@@ -283,15 +320,16 @@ function renderConnection() {
   document.querySelector('#undo').disabled=!ready||busy||position===0;
   document.querySelector('#genmove').disabled=!ready||(busy&&!genmoveController);
   for(const button of document.querySelectorAll('[data-step],[data-jump],#autoplay'))button.disabled=!ready||busy;
-  document.querySelector('#move-slider').disabled=!ready||busy||moves.length===0;
+  document.querySelector('#move-slider').disabled=!ready||busy||reviewMoves().length===0;
   for(const point of document.querySelectorAll('[data-index]'))point.setAttribute('aria-disabled',String(!ready||busy));
   for(const button of document.querySelectorAll('[data-candidate]'))button.disabled=!ready||busy;
 }
 
 function acceptSnapshot(next) {
   const previous=snapshot;
+  sgfReview.acceptSession(next.sessionId);
   if(previous&&previous.sessionId!==next.sessionId)rates.clear();
-  const preserveHover=Boolean(previous&&previous.sessionId===next.sessionId&&previous.generation===next.generation&&previous.position===next.position&&previous.toPlay===next.toPlay&&JSON.stringify(previous.board)===JSON.stringify(next.board));
+  const preserveHover=Boolean(previous&&previous.sessionId===next.sessionId&&previous.generation===next.generation&&previous.position===next.position&&previous.toPlay===next.toPlay&&JSON.stringify(previous.board)===JSON.stringify(next.board)&&JSON.stringify(previous.moves)===JSON.stringify(next.moves));
   snapshot=next;moves=next.moves;position=next.position;
   settings={...settings,...next.settings};
   if(!previous||JSON.stringify(previous.moves)!==JSON.stringify(moves))frames=replayFrames(moves);
@@ -305,23 +343,38 @@ function toast(text) {
   clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),3200);
 }
 function stop() { clearInterval(timer);timer=null;document.querySelector('#autoplay').innerHTML=icon('play'); }
-async function mutate(type,payload={},options={}) {
+async function withMutation(action) {
   if(busy)return false;
   if(!session?.ready){toast('服务尚未连接，棋局保持不变');return false;}
   cancelVariation();busy=true;renderConnection();
   try {
-    await session.command(type,payload,options);
+    await action();
     return true;
   } catch(error) {
     toast(error.name==='AbortError'?'已取消 AI 落子':error.message);
     return false;
   } finally { busy=false;renderConnection(); }
 }
-async function jump(next) { if(next===position)return true;return mutate('seek',{position:next}); }
+function mutate(type,payload={},options={}) {
+  return withMutation(async()=>{
+    await session.command(type,payload,options);
+    if(type==='new_game'){sgfReview.clear();render();}
+  });
+}
+async function jump(next) {
+  next=Math.max(0,Math.min(reviewMoves().length,next));
+  const restore=sgfReview.needsRestore(moves);
+  if(next===position&&!restore)return true;
+  return withMutation(async()=>{
+    if(restore)await session.command('set_position',sgfReview.positionPayload());
+    if(next!==position)await session.command('seek',{position:next});
+  });
+}
 function autoplay() {
   if(timer){stop();return;}
-  const start=async()=>{if(position===moves.length&&!await jump(0))return;
-    timer=setInterval(async()=>{if(busy)return;if(position>=moves.length){stop();return;}if(!await jump(position+1))stop();},650);
+  const start=async()=>{
+    if(!await jump(position>=reviewMoves().length?0:position))return;
+    timer=setInterval(async()=>{if(busy)return;if(position>=reviewMoves().length){stop();return;}if(!await jump(position+1))stop();},650);
     document.querySelector('#autoplay').innerHTML=icon('pause');
   };void start();
 }
@@ -339,22 +392,18 @@ function renderSettings() {
 function dialog(html) { document.querySelector('#dialog').innerHTML=html;document.querySelector('#dialog').showModal(); }
 
 function playTarget(target) {
-  stop();void mutate('play',{index:candidateIndex(target.dataset.index??target.dataset.candidate),color:frames[position].next});
+  playMove(candidateIndex(target.dataset.index??target.dataset.candidate));
 }
-// Send mouse moves on press: a live analysis render can replace the target
-// before release, causing the browser's later click to miss the intersection.
-document.addEventListener('pointerdown',event=>{
-  if(event.pointerType!=='mouse'||event.button!==0)return;
-  const target=event.target.closest('[data-index],[data-candidate]');
-  if(target)playTarget(target);
-});
+function playMove(index) {
+  stop();
+  const next=sgfReview.record&&sgfReview.next(moves,position);
+  if(next&&next.index===index&&next.color===frames[position].next){void jump(position+1);return;}
+  void mutate('play',{index,color:frames[position].next});
+}
 document.addEventListener('click',event=>{
   const button=event.target.closest('button,[data-index]');if(!button)return;
-  if(button.dataset.index!==undefined||button.dataset.candidate!==undefined){
-    // Touch, keyboard and assistive activation retain click semantics.
-    if(!(event.pointerType==='mouse'&&event.detail>0))playTarget(button);
-  }
-  if(button.dataset.step){stop();void jump({first:0,back:Math.max(0,position-1),forward:Math.min(moves.length,position+1),last:moves.length}[button.dataset.step]);}
+  if(button.dataset.index!==undefined||button.dataset.candidate!==undefined)return;
+  if(button.dataset.step){stop();void jump({first:0,back:Math.max(0,position-1),forward:Math.min(reviewMoves().length,position+1),last:reviewMoves().length}[button.dataset.step]);}
   if(button.dataset.jump){stop();void jump(Number(button.dataset.jump));}
   if(button.dataset.mode||button.dataset.nav)setMode(button.dataset.mode||button.dataset.nav);
   if(button.dataset.tab)selectAnalysisTab(button);
@@ -375,21 +424,25 @@ document.querySelector('.analysis-tabs').addEventListener('keydown',event=>{
   const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
   tabs[next].focus();selectAnalysisTab(tabs[next]);
 });
-document.querySelector('#board').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();event.target.dispatchEvent(new MouseEvent('click',{bubbles:true}));}});
+document.querySelector('#board').addEventListener('keydown',event=>{
+  if(event.key!=='Enter'&&event.key!==' ')return;
+  const target=event.target.closest('[data-index]');
+  if(target){event.preventDefault();event.stopPropagation();playTarget(target);}
+});
 document.querySelector('#autoplay').onclick=autoplay;
 document.querySelector('#move-slider').oninput=event=>{
   scrubbing=true;
-  event.target.setAttribute('aria-valuetext','第 '+event.target.value+' 手，共 '+moves.length+' 手');
+  event.target.setAttribute('aria-valuetext','第 '+event.target.value+' 手，共 '+reviewMoves().length+' 手');
 };
 document.querySelector('#move-slider').onchange=async event=>{
   stop();
   await jump(Number(event.target.value));
   scrubbing=false;
   event.target.value=position;
-  event.target.setAttribute('aria-valuetext','第 '+position+' 手，共 '+moves.length+' 手');
+  event.target.setAttribute('aria-valuetext','第 '+position+' 手，共 '+reviewMoves().length+' 手');
 };
-document.querySelector('#undo').onclick=()=>{stop();void mutate('undo');};
-document.querySelector('#pass').onclick=()=>{stop();void mutate('play',{index:null,color:frames[position].next});};
+document.querySelector('#undo').onclick=()=>{stop();void (sgfReview.record?jump(position-1):mutate('undo'));};
+document.querySelector('#pass').onclick=()=>playMove(null);
 document.querySelector('#clear-board').onclick=async()=>{stop();if(await mutate('new_game',{komi:settings.komi,rules:'chinese'})){rates.clear();render();toast('已清枰，保留双方与规则设置');}};
 document.querySelector('#genmove').onclick=async()=>{
   if(genmoveController){genmoveController.abort();return;}
@@ -432,15 +485,15 @@ document.querySelector('#dialog').addEventListener('submit',async event=>{
 document.querySelector('#expand').onclick=()=>{
   const expanded=document.querySelector('.dashboard').classList.toggle('expanded');
   placePlayback();
-  document.querySelector('#expand').setAttribute('aria-label',expanded?'恢复布局':'放大棋盘');
+  document.querySelector('#expand').setAttribute('aria-label',expanded?'恢复布局':'专注棋盘');
   document.querySelector('#expand').setAttribute('aria-pressed',String(expanded));
 };
-document.querySelector('#settings').onclick=()=>dialog('<form method="dialog"><h2>棋盘偏好</h2><p>棋盘下方可切换候选点与手数；右侧「推荐选点」底部可调整候选点显示比例。显示偏好保存在当前浏览器会话中。</p><p>拖动棋盘与分析栏之间的分隔线可调整宽度，双击恢复默认。点击棋盘右上角可进入专注模式。</p><button class="button primary">知道了</button></form>');
+document.querySelector('#settings').onclick=()=>dialog('<form method="dialog"><h2>棋盘偏好</h2><p>复盘区下方可切换候选点与手数；右侧「推荐选点」底部可调整候选点显示比例。显示偏好保存在当前浏览器会话中。</p><p>拖动棋盘与分析栏之间的分隔线可调整宽度，双击恢复默认。点击棋盘右上角可进入专注模式。</p><button class="button primary">知道了</button></form>');
 document.querySelector('#help').onclick=event=>{
-  event.preventDefault();dialog('<form method="dialog"><h2>欢迎来到弈间</h2><p>连接服务后点击交叉点落子，也可选择 AI 落子。胜率、目差和候选点来自真实分析；暂无算力时显示等待状态。</p><p>方向键逐手复盘，空格自动播放；在历史位置落子会替换后续记录。悬停候选点只读取已有变化。</p><p>SGF 导入支持 19 路中国规则、无摆子、无分支的交替落子棋谱。短暂断线后会恢复服务会话；请导出 SGF 长期保存。</p><button class="button primary">开始探索</button></form>');
+  event.preventDefault();dialog('<form method="dialog"><h2>欢迎来到弈间</h2><p>分析模式：鼠标悬停候选点看变化、单击落子；触屏点一次预览，再点同一点落子，点其他位置切换预览。自由对弈直接点按落子。</p><p>方向键逐手复盘，空格自动播放。导入 SGF 后从空枰开始，橙色圆环提示下一手；点中该落点等同下一步，点其他位置可试下，回退或播放会返回原谱。未导入棋谱时，在历史位置落子会替换后续记录。变化预览只读取已有搜索结果。</p><p>SGF 导入支持 19 路中国规则、无摆子、无分支的交替落子棋谱。短暂断线后会恢复服务会话；请导出 SGF 长期保存。</p><button class="button primary">开始探索</button></form>');
 };
 document.querySelector('#export').onclick=()=>{
-  const sgf=exportSGF(moves,{...settings,rules:'Chinese'});
+  const sgf=exportSGF(reviewMoves(),{...settings,rules:'Chinese'});
   const url=URL.createObjectURL(new Blob([sgf],{type:'application/x-go-sgf'})),link=document.createElement('a');
   link.href=url;link.download='弈间-棋局.sgf';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('棋谱已导出');
 };
@@ -449,10 +502,16 @@ document.querySelector('#file').onchange=async event=>{
   const file=event.target.files[0];if(!file)return;
   try{
     const imported=parseSGF(await file.text());stop();
-    if(await mutate('set_position',{boardSize:19,moves:imported.moves,komi:imported.settings.komi,rules:'chinese'})){
+    if(await withMutation(async()=>{
+      await session.command('set_position',{boardSize:19,moves:imported.moves,komi:imported.settings.komi,rules:'chinese'});
+      sgfReview.load(snapshot.sessionId,imported);
       settings={...settings,black:imported.settings.black,white:imported.settings.white};
-      saveLocal('yijian-players',{black:settings.black,white:settings.white});rates.clear();render();toast('已导入 '+moves.length+' 手棋谱');
-    }
+      saveLocal('yijian-players',{black:settings.black,white:settings.white});rates.clear();render();
+      if(position!==0){
+        try { await session.command('seek',{position:0}); }
+        catch(error) { throw new Error('棋谱已导入，但回到开局失败：'+error.message+'；请点击“回到开局”重试'); }
+      }
+    }))toast('已导入 '+moves.length+' 手棋谱，已回到开局');
   }catch(error){toast(error.message);}finally{event.target.value='';}
 };
 
@@ -460,12 +519,13 @@ let variationMarkup=null;
 const variationHover=createVariationHover({
   onPending:({refreshing})=>{if(!refreshing)setVariationStatus('正在读取已有变化…');},
   onResult:(result,payload)=>{
-    if(result.available===false){setVariationStatus('当前搜索图暂无该点的后续变化');return;}
     if(payload.generation!==snapshot?.generation)return;
+    if(result.available===false){restoreVariationBoard();setVariationStatus('当前搜索图暂无该点的后续变化');return;}
     try{
       const preview=previewVariation(payload.board,payload.toPlay,result.moves,payload.candidate);
       document.querySelector('#position-stones').setAttribute('visibility','hidden');
       document.querySelector('#candidate-markers').setAttribute('visibility','hidden');
+      document.querySelector('#next-move-marker').setAttribute('visibility','hidden');
       document.querySelector('#hover-stone').setAttribute('visibility','hidden');
       const markup=stoneMarkup(preview.board,new Map(preview.stones.map(move=>[move.index,move.number])));
       if(markup!==variationMarkup){
@@ -475,16 +535,35 @@ const variationHover=createVariationHover({
       setVariationStatus(result.moves.length?result.moves.map((move,index)=>(index+1)+'. '+(move.color===1?'●':'○')+' '+pointLabel(move.index)).join(' → '):'暂无后续变化');
     }catch(error){setVariationStatus(error.message);}
   },
-  onError:error=>setVariationStatus(error.message||'变化加载失败，请移入重试')
+  onError:error=>setVariationStatus(error.message||'变化加载失败，正在重试')
 });
-function setVariationStatus(text) { const el=document.querySelector('#variation-status');if(el)el.textContent=text; }
-function cancelVariation() {
-  variationHover.cancel();hoverTarget=null;variationMarkup=null;
+function variationHint() { return touchInput?'点一次看变化，再点同一点落子；预览保留至退出。':'悬停候选点看变化，单击落子；移开鼠标结束预览。'; }
+function variationIdleHint() { return touchInput?'点选位置，预览已有变化':'悬停候选点，预览已有变化'; }
+function renderInputHints() {
+  document.querySelector('#board-input-hint').textContent=mode==='play'?'点按交叉点落子':touchInput?'点一次看变化 · 再点同一点落子':'悬停候选点看变化 · 单击落子';
+  const hint=document.querySelector('#variation-hint');if(hint)hint.textContent=variationHint();
+}
+function setVariationStatus(text) {
+  for(const id of ['variation-status','touch-preview-status']){
+    const el=document.querySelector('#'+id);if(el&&el.textContent!==text)el.textContent=text;
+  }
+}
+function restoreVariationBoard() {
+  variationMarkup=null;
   document.querySelector('#variation-overlay')?.replaceChildren();
   document.querySelector('#position-stones')?.removeAttribute('visibility');
   document.querySelector('#candidate-markers')?.removeAttribute('visibility');
-  setVariationStatus('悬停候选点，预览已有变化');
+  document.querySelector('#next-move-marker')?.removeAttribute('visibility');
 }
+function clearVariation() {
+  variationHover.cancel();hoverTarget=null;
+  restoreVariationBoard();
+  document.querySelector('#touch-preview').hidden=true;
+  document.querySelector('#touch-selection')?.setAttribute('visibility','hidden');
+  document.querySelector('#hover-stone')?.setAttribute('visibility','hidden');
+  setVariationStatus(variationIdleHint());
+}
+function cancelVariation() { touchPreview.reset();clearVariation(); }
 function getVariationTarget(target) {
   if(!(target instanceof Element)||mode!=='analysis'||!session?.ready||busy||!candidates().length)return null;
   const row=target.closest('[data-candidate]');if(row)return row;
@@ -492,26 +571,59 @@ function getVariationTarget(target) {
   const point=target.closest('[data-index]');
   return point&&showCandidates&&candidateList().includes(Number(point.dataset.index))?point:null;
 }
-document.addEventListener('pointerover',event=>{
-  const target=getVariationTarget(event.target);if(!target||target===hoverTarget)return;
+function beginVariation(target) {
+  if(!target||target===hoverTarget)return;
   cancelVariation();hoverTarget=target;
   const raw=target.dataset.candidate??target.dataset.index;
   const candidate=raw===undefined?candidates()[0].index:candidateIndex(raw),frame=frames[position];
   variationHover.schedule({board:[...frame.board],toPlay:frame.next,candidate,generation:snapshot.generation});
+}
+const inputContext=()=>snapshot?snapshot.sessionId+':'+snapshot.generation+':'+snapshot.position+':'+mode:null;
+const targetIndex=target=>candidateIndex(target.dataset.index??target.dataset.candidate);
+const touchPreview=createTouchPreview({
+  activate:playTarget,
+  getContext:inputContext,
+  getKey:targetIndex,
+  canPreview:target=>mode==='analysis'&&session?.ready&&!busy&&(targetIndex(target)===null||!frames[position].board[targetIndex(target)]),
+  preview:target=>{
+    stop();clearVariation();
+    const candidate=targetIndex(target),frame=frames[position];
+    document.querySelector('#touch-preview').hidden=false;
+    document.querySelector('#touch-preview-target').textContent='预览 '+pointLabel(candidate);
+    if(candidate!==null){
+      const marker=document.querySelector('#touch-selection');
+      marker.setAttribute('cx',42+candidate%19*32);marker.setAttribute('cy',42+Math.floor(candidate/19)*32);marker.removeAttribute('visibility');
+    }
+    setVariationStatus('正在读取已有变化…');
+    variationHover.schedule({board:[...frame.board],toPlay:frame.next,candidate,generation:snapshot.generation},{immediate:true});
+  },
 });
-document.addEventListener('pointerout',event=>{if(hoverTarget&&hoverTarget.contains(event.target)&&!hoverTarget.contains(event.relatedTarget))cancelVariation();});
-document.querySelector('#board').addEventListener('pointermove',event=>{
+document.querySelector('#exit-preview').onclick=cancelVariation;
+const hasPointerEvents=typeof window.PointerEvent==='function';
+const fromMouse=event=>!event.pointerType||event.pointerType==='mouse';
+document.addEventListener(hasPointerEvents?'pointerover':'mouseover',event=>{
+  if(fromMouse(event)&&!touchPreview.selection)beginVariation(getVariationTarget(event.target));
+});
+document.addEventListener(hasPointerEvents?'pointerout':'mouseout',event=>{if(fromMouse(event)&&!touchPreview.selection&&hoverTarget&&hoverTarget.contains(event.target)&&!hoverTarget.contains(event.relatedTarget))cancelVariation();});
+document.querySelector('#board').addEventListener(hasPointerEvents?'pointermove':'mousemove',event=>{
+  if(!fromMouse(event)||touchPreview.selection)return;
   const point=event.target.closest('[data-index]'),ghost=document.querySelector('#hover-stone');
   if(!point||!session?.ready||busy||frames[position].board[Number(point.dataset.index)]||document.querySelector('#variation-overlay').childNodes.length){ghost.setAttribute('visibility','hidden');return;}
   const index=Number(point.dataset.index);ghost.setAttribute('cx',42+index%19*32);ghost.setAttribute('cy',42+Math.floor(index/19)*32);ghost.setAttribute('visibility','visible');
 });
-document.querySelector('#board').addEventListener('pointerleave',()=>document.querySelector('#hover-stone').setAttribute('visibility','hidden'));
+document.querySelector('#board').addEventListener(hasPointerEvents?'pointerleave':'mouseleave',()=>document.querySelector('#hover-stone').setAttribute('visibility','hidden'));
+setupBoardInput(document,{
+  activate:target=>{touchInput=false;renderInputHints();playTarget(target);},
+  tap:target=>{touchInput=true;renderInputHints();touchPreview.tap(target);},
+  getContext:inputContext,
+  pointerEvents:hasPointerEvents,
+});
 document.addEventListener('keydown',event=>{
+  if(event.key==='Escape')cancelVariation();
   if(document.querySelector('dialog[open]')||['INPUT','BUTTON','SELECT','TEXTAREA'].includes(document.activeElement.tagName)||!session?.ready)return;
   if(event.code==='Space'){event.preventDefault();autoplay();}
-  if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();stop();void jump(Math.max(0,Math.min(moves.length,position+(event.key==='ArrowRight'?1:-1))));}
+  if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();stop();void jump(Math.max(0,Math.min(reviewMoves().length,position+(event.key==='ArrowRight'?1:-1))));}
 });
-const endpoint=import.meta.env.VITE_ENGINE_WS_URL||((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
 session=new EngineSession({url:endpoint,storage,onSnapshot:acceptSnapshot,onNotice:toast,onStatus:status=>{
   connectionStatus=status;
   if(status!=='ready'&&status!=='connected'){cancelVariation();stop();}

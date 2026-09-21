@@ -49,7 +49,8 @@ export function parseSGF(source) {
   if (!nodes.length || !closedGame) fail('SGF 棋谱未结束');
   if (offset !== source.length) fail('当前仅支持单局 SGF');
   const root = nodes[0];
-  if (root.SZ?.[0] !== '19') fail('当前服务仅支持 19 路棋谱');
+  // SGF defaults Go games to 19x19 when SZ is omitted; explicit invalid sizes still fail.
+  if ((root.SZ?.[0] ?? '19') !== '19') fail('当前服务仅支持 19 路棋谱');
   if (root.GM && root.GM[0] !== '1') fail('请选择围棋 SGF 棋谱');
   const rules = root.RU?.[0] ?? 'Chinese';
   if (!['Chinese', 'chinese', '中国规则'].includes(rules)) fail('当前服务仅支持中国规则棋谱');

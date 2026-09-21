@@ -86,6 +86,11 @@ def run():
             assert any(message.get("error", {}).get("code") == "NO_WORKERS" for message in messages)
 
         page.locator("#file").set_input_files({"name": "live.sgf", "mimeType": "application/x-go-sgf", "buffer": b"(;SZ[19]RU[Chinese]KM[6.5]PB[Live Black]PW[Live White];B[dd];W[pp];B[])"})
+        expect(page.locator("#toast")).to_contain_text("已回到开局")
+        expect(page.locator("#move-count")).to_have_text("0")
+        expect(page.locator("#position-stones .board-stone")).to_have_count(0)
+        expect(page.locator("#next-move")).to_have_text("棋谱下一手：黑 D16")
+        page.locator('[data-step="last"]').click()
         expect(page.locator("#move-count")).to_have_text("3")
         expect(page.locator(".game-meta")).to_contain_text("6.5")
         page.locator("#file").set_input_files({"name": "illegal.sgf", "mimeType": "application/x-go-sgf", "buffer": b"(;SZ[19]KM[7.5];B[dd];W[dd])"})

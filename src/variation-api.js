@@ -16,7 +16,7 @@ export function createVariationHover({ request = requestVariation, onResult, onP
     controller = undefined;
     generation++;
   }
-  function schedule(payload) {
+  function schedule(payload, { immediate = false } = {}) {
     cancel();
     const current = generation;
     async function fetchVariation(refreshing = false) {
@@ -36,7 +36,8 @@ export function createVariationHover({ request = requestVariation, onResult, onP
         }
       }
     }
-    timer = setTimeout(() => fetchVariation(), delay);
+    if (immediate) void fetchVariation();
+    else timer = setTimeout(() => fetchVariation(), delay);
   }
   return { schedule, cancel };
 }

@@ -26,7 +26,7 @@ export function setupWorkspaceResize(workspace, divider, storage) {
     if(event.button!==0)return;
     event.preventDefault();
     drag={x:event.clientX,width:Number(divider.getAttribute('aria-valuenow'))};
-    divider.setPointerCapture(event.pointerId);
+    divider.setPointerCapture?.(event.pointerId);
     divider.focus();
     workspace.classList.add('resizing');
   });
@@ -46,8 +46,34 @@ export function setupWorkspaceResize(workspace, divider, storage) {
     const current=Number(divider.getAttribute('aria-valuenow'));
     save(event.key==='Home'?defaultWidth:current+(event.key==='ArrowLeft'?16:-16));
   });
-  const observer=new ResizeObserver(()=>apply(preferred));
-  observer.observe(workspace);
+  const resize=()=>apply(preferred);
+  const observer=typeof ResizeObserver==='function'?new ResizeObserver(resize):null;
+  observer?.observe(workspace);
+  window.addEventListener('resize',resize);
   apply(preferred);
-  return ()=>observer.disconnect();
+  return ()=>{observer?.disconnect();window.removeEventListener('resize',resize);};
+}
+
+export function fitBoardSize(width,height,paddingX=0,paddingY=0) {
+  return Math.max(0,Math.floor(Math.min(width-paddingX,height-paddingY)));
+}
+
+// Measure the actual remaining space, without depending on CSS container units.
+export function setupBoardSizing(stage,board,compactLayout) {
+  let frame;
+  const resize=()=>{
+    cancelAnimationFrame(frame);
+    frame=requestAnimationFrame(()=>{
+      if(compactLayout.matches){board.style.width='';return;}
+      const style=getComputedStyle(stage);
+      const paddingX=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight);
+      const paddingY=parseFloat(style.paddingTop)+parseFloat(style.paddingBottom);
+      board.style.width=fitBoardSize(stage.clientWidth,stage.clientHeight,paddingX,paddingY)+'px';
+    });
+  };
+  const observer=typeof ResizeObserver==='function'?new ResizeObserver(resize):null;
+  observer?.observe(stage);
+  window.addEventListener('resize',resize);
+  resize();
+  return ()=>{cancelAnimationFrame(frame);observer?.disconnect();window.removeEventListener('resize',resize);};
 }

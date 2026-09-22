@@ -7,6 +7,8 @@ import {SgfReview} from './sgf-review.js';
 import {EngineSession} from './engine-session.js';
 import {setupWorkspaceResize, setupBoardSizing} from './workspace-layout.js';
 import {setupBoardInput, createTouchPreview} from './board-input.js';
+import {defaultSearchSettings, defaultPdaPlayer, pdaReuseHint, searchSettingsPayload, searchSettingsSummary, searchSettingsKey} from './search-settings.js';
+import {capacityReason, capacityUsage, rootReuseDescription} from './search-capacity.js';
 
 const icons={board:'▦',chart:'↗',folder:'▱',settings:'⚙',chevron:'⌄',back:'←',forward:'→',first:'⇤',last:'⇥',play:'▶',pause:'Ⅱ',download:'↓',upload:'↑',expand:'⤢',undo:'↶',plus:'＋'};
 const icon=key=>'<span class="icon" aria-hidden="true">'+(icons[key]||key)+'</span>';
@@ -300,16 +302,20 @@ function renderConnection() {
   const statuses={idle:'已暂停',analyzing:'运行中',waiting_workers:'等待算力',memory_limited:'容量受限',finished:'已完成',error:'分析失败'};
   document.querySelector('#analysis-status').textContent=ready?(statuses[analysis?.status]??'待命'):'未连接';
   const descriptions={idle:'点击开始分析，获取当前局面评估',analyzing:'正在分析当前局面',waiting_workers:'暂无可用推理节点，保留最新有效结果',memory_limited:'搜索容量已达限制，已有结果仍可查看',finished:'本轮分析已完成',error:'分析暂不可用'};
-  const capacityReasons={
-    'configured search depth budget reached':'搜索深度已达上限，已有结果仍可查看',
-    'configured search graph or depth budget reached':'搜索节点、内存或深度已达上限，已有结果仍可查看',
-    'search graph capacity reached; change position or increase the graph budget to continue':'搜索容量已达上限，落子或切换局面后可继续分析'
-  };
-  const capacityReason=capacityReasons[analysis?.reason]??analysis?.reason;
-  const description=analysis?.status==='memory_limited'&&capacityReason?capacityReason:(descriptions[analysis?.status]??'已连接围棋分析服务');
+  const reason=capacityReason(analysis);
+  const description=analysis?.status==='memory_limited'&&reason?reason:(descriptions[analysis?.status]??'已连接围棋分析服务');
   document.querySelector('#engine-description').textContent=ready?description:'棋局保留，连接恢复后同步最新状态';
   document.querySelector('#engine-description').title=analysis?.reason??'';
+  let capacity=document.querySelector('#engine-capacity');
+  if(!capacity){capacity=document.createElement('p');capacity.id='engine-capacity';document.querySelector('.engine-panel').append(capacity);}
+  capacity.textContent=capacityUsage(analysis);
+  capacity.hidden=!capacity.textContent;
+  capacity.title='Server 搜索图的预算计费，包含必要预留；不是操作系统显示的进程实际内存。';
+  let reuse=document.querySelector('#engine-reuse');
+  if(!reuse){reuse=document.createElement('p');reuse.id='engine-reuse';document.querySelector('.engine-panel').append(reuse);}
+  reuse.textContent=rootReuseDescription(analysis?.rootChange);reuse.hidden=!reuse.textContent;
   document.querySelector('#engine-visits').textContent=formatNumber(analysis?.visits??0);
+  document.querySelector('#engine-visits').title=(analysis?.visits??0).toLocaleString('zh-CN')+' visits';
   document.querySelector('#engine-speed').textContent=ready?formatNumber(analysis?.nodesPerSecond??0):'—';
   const active=Boolean(session?.analysisIntent);
   document.querySelector('#analysis-toggle').innerHTML=icon(active?'pause':'play')+'<span>'+(active?'停止分析':'开始分析')+'</span>';
@@ -319,6 +325,13 @@ function renderConnection() {
   for(const id of ['import','new','pass','clear-board','analysis-toggle'])document.querySelector('#'+id).disabled=!ready||busy;
   document.querySelector('#undo').disabled=!ready||busy||position===0;
   document.querySelector('#genmove').disabled=!ready||(busy&&!genmoveController);
+  const searchForm=document.querySelector('#search-settings-form');
+  if(searchForm){
+    const supported=Boolean(snapshot?.settings?.search);
+    searchForm.querySelector('fieldset').disabled=!ready||busy||!supported;
+    searchForm.querySelector('[type="submit"]').disabled=!ready||busy||!supported;
+    searchForm.querySelector('#search-availability').textContent=!ready?'连接恢复后可应用参数':!supported?'当前 Server 尚不支持搜索参数，请更新 Server 后重试。':'';
+  }
   for(const button of document.querySelectorAll('[data-step],[data-jump],#autoplay'))button.disabled=!ready||busy;
   document.querySelector('#move-slider').disabled=!ready||busy||reviewMoves().length===0;
   for(const point of document.querySelectorAll('[data-index]'))point.setAttribute('aria-disabled',String(!ready||busy));
@@ -328,7 +341,7 @@ function renderConnection() {
 function acceptSnapshot(next) {
   const previous=snapshot;
   sgfReview.acceptSession(next.sessionId);
-  if(previous&&previous.sessionId!==next.sessionId)rates.clear();
+  if(previous&&(previous.sessionId!==next.sessionId||searchSettingsKey(previous.settings?.search)!==searchSettingsKey(next.settings?.search)))rates.clear();
   const preserveHover=Boolean(previous&&previous.sessionId===next.sessionId&&previous.generation===next.generation&&previous.position===next.position&&previous.toPlay===next.toPlay&&JSON.stringify(previous.board)===JSON.stringify(next.board)&&JSON.stringify(previous.moves)===JSON.stringify(next.moves));
   snapshot=next;moves=next.moves;position=next.position;
   settings={...settings,...next.settings};
@@ -388,6 +401,7 @@ function renderSettings() {
   document.querySelector('#black-player').textContent=settings.black;
   document.querySelector('#white-player').textContent=settings.white;
   document.querySelector('.game-meta').textContent='19 路 · 贴目 '+settings.komi+' · '+(ruleNames[settings.rules]??settings.rules);
+  document.querySelector('#search-summary').textContent=snapshot?searchSettingsSummary(snapshot.settings?.search):'连接后可调节';
 }
 function dialog(html) { document.querySelector('#dialog').innerHTML=html;document.querySelector('#dialog').showModal(); }
 
@@ -488,7 +502,53 @@ document.querySelector('#expand').onclick=()=>{
   document.querySelector('#expand').setAttribute('aria-label',expanded?'恢复布局':'专注棋盘');
   document.querySelector('#expand').setAttribute('aria-pressed',String(expanded));
 };
-document.querySelector('#settings').onclick=()=>dialog('<form method="dialog"><h2>棋盘偏好</h2><p>复盘区下方可切换候选点与手数；右侧「推荐选点」底部可调整候选点显示比例。显示偏好保存在当前浏览器会话中。</p><p>拖动棋盘与分析栏之间的分隔线可调整宽度，双击恢复默认。点击棋盘右上角可进入专注模式。</p><button class="button primary">知道了</button></form>');
+function showSearchSettings() {
+  stop();
+  const search=snapshot?.settings?.search??defaultSearchSettings;
+  const sourceSession=snapshot?.sessionId,generation=snapshot?.generation;
+  dialog(`<form id="search-settings-form"><span class="eyebrow">ENGINE SETTINGS</span><h2>搜索参数</h2>
+    <p class="search-intro">用于当前棋局的持续分析与 AI 落子。</p>
+    <fieldset class="search-fields">
+      <section class="search-option"><label class="search-switch"><strong>PDA 棋力预期</strong><input type="checkbox" name="pdaEnabled" aria-label="开启 PDA" ${search.playoutDoublingAdvantage!==0?'checked':''}></label>
+        <p id="pda-help">正值假设参照方更强，负值假设更弱。1 表示约 2 倍搜索量的棋力预期；不会增加实际算力。</p>
+        <div class="game-form rule-fields"><label>PDA 数值<input name="pda" type="number" min="-3" max="3" step="any" required aria-describedby="pda-help" value="${escapeHTML(search.playoutDoublingAdvantage||0.5)}"></label>
+        <label>参照方<select name="player"><option value="black">固定黑方（可继承）</option><option value="white">固定白方（可继承）</option><option value="root">随行棋方（换方重算）</option></select></label></div>
+        <small>范围 −3～3；0 关闭。首次开启默认固定当前这一方。</small>
+        <p id="pda-reuse-hint" role="status"></p>
+      </section>
+      <section class="search-option"><label class="search-switch"><strong>宽根搜索</strong><input type="checkbox" name="wideEnabled" aria-label="开启宽根搜索" ${search.wideRootNoise>0?'checked':''}></label>
+        <p id="wide-help">在当前局面探索更多候选着法。强度越高，搜索越分散，可从 0.04 开始。</p>
+        <div class="game-form"><label>宽根强度<input name="wide" type="number" min="0" max="5" step="any" required aria-describedby="wide-help" value="${escapeHTML(search.wideRootNoise||0.04)}"></label></div>
+        <small>范围 0～5；0 关闭。此参数影响实际搜索。</small>
+      </section>
+    </fieldset>
+    <p class="search-reset-note">改变实际 PDA 会重新分析。只调整宽根，或将 PDA 参照方改为等效的固定方，会保留已有搜索。参数变化后清除本页旧胜率曲线，棋谱保留。</p>
+    <p id="search-availability" role="status"></p><p id="search-error" role="alert"></p>
+    <div class="dialog-actions"><button type="button" class="button" id="reset-search">恢复默认</button><button type="button" class="button" id="cancel-search">取消</button><button type="submit" class="button primary">应用参数</button></div>
+    <details class="display-preferences"><summary>棋盘显示偏好</summary><p>复盘区下方切换候选点与手数；「推荐选点」底部调整候选显示比例。拖动棋盘与分析栏间的分隔线调整宽度，双击恢复。</p></details>
+  </form>`);
+  const form=document.querySelector('#search-settings-form'),f=form.elements;
+  f.player.value=defaultPdaPlayer(search,snapshot?.toPlay);
+  const sync=()=>{f.pda.disabled=!f.pdaEnabled.checked;f.player.disabled=!f.pdaEnabled.checked;f.wide.disabled=!f.wideEnabled.checked;document.querySelector('#pda-reuse-hint').textContent=pdaReuseHint(f.pdaEnabled.checked,f.player.value);};
+  f.pdaEnabled.onchange=sync;f.player.onchange=sync;f.wideEnabled.onchange=sync;sync();renderConnection();
+  form.querySelector('#cancel-search').onclick=()=>document.querySelector('#dialog').close();
+  form.querySelector('#reset-search').onclick=()=>{f.pdaEnabled.checked=false;f.wideEnabled.checked=false;f.pda.value=0.5;f.wide.value=0.04;f.player.value=defaultPdaPlayer(defaultSearchSettings,snapshot?.toPlay);sync();};
+  form.onsubmit=async event=>{
+    event.preventDefault();
+    const error=form.querySelector('#search-error');error.textContent='';
+    if(snapshot?.sessionId!==sourceSession){error.textContent='棋局会话已变化，请重新打开搜索参数。';return;}
+    let search;
+    try{search=searchSettingsPayload({pdaEnabled:f.pdaEnabled.checked,pda:f.pda.value,player:f.player.value,wideEnabled:f.wideEnabled.checked,wide:f.wide.value});}
+    catch(e){error.textContent=e.message;return;}
+    if(await mutate('configure_search',{search,generation})){document.querySelector('#dialog').close();toast('搜索参数已应用');}
+  };
+}
+const searchButton=document.createElement('button');
+searchButton.type='button';searchButton.id='search-settings';searchButton.className='search-settings-button';
+searchButton.innerHTML='<span>搜索参数 <span aria-hidden="true">↗</span></span><small id="search-summary"></small>';
+document.querySelector('.engine-panel').append(searchButton);
+document.querySelector('#settings').onclick=showSearchSettings;
+searchButton.onclick=showSearchSettings;
 document.querySelector('#help').onclick=event=>{
   event.preventDefault();dialog('<form method="dialog"><h2>欢迎来到弈间</h2><p>分析模式：鼠标悬停候选点看变化、单击落子；触屏点一次预览，再点同一点落子，点其他位置切换预览。自由对弈直接点按落子。</p><p>方向键逐手复盘，空格自动播放。导入 SGF 后从空枰开始，橙色圆环提示下一手；点中该落点等同下一步，点其他位置可试下，回退或播放会返回原谱。未导入棋谱时，在历史位置落子会替换后续记录。变化预览只读取已有搜索结果。</p><p>SGF 导入支持 19 路中国规则、无摆子、无分支的交替落子棋谱。短暂断线后会恢复服务会话；请导出 SGF 长期保存。</p><button class="button primary">开始探索</button></form>');
 };

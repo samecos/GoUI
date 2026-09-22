@@ -1,5 +1,7 @@
 # 前端 WebSocket 契约
 
+2026-09-22：分析卡片消费可选的 `analysis.limits.maxMemoryBytes/maxNodes/maxDepth`，展示 `memoryBytes` 的预算用量及 `graphNodes`。这是 Server 计费（包含必要预留），不是进程实际内存。新增的 memory/node/depth 停止原因分别翻译为内存预算、节点数、深度限制；旧版缺少 limits 时隐藏预算行。访问量悬停提示显示完整数字。
+
 本文记录当前前端实际发送和消费的协议子集，依据本仓库的连接、会话、界面代码及测试整理。它用于实现兼容服务、识别后端依赖；不代表完整后端规范，也不表示本仓库包含或发布了后端、推理 Worker 或模型。测试夹具仅验证交互，不能用作围棋规则或 AI 引擎。
 
 ## 连接与消息
@@ -104,6 +106,7 @@
 | `new_game` | `komi`、`rules:"chinese"` | 清空棋局并应用设置，返回完整快照。 |
 | `set_position` | `boardSize:19`、`moves`、`komi`、`rules:"chinese"` | 导入完整主线并定位末手，返回完整快照；应先完整校验，失败保留原棋局。 |
 | `analyze` | `enabled`，布尔值 | 开始 / 停止持续分析，返回完整快照；后续分析通过快照更新。 |
+| `configure_search` | `search` 对象、打开设置时的 `generation` | 调整 PDA 与宽根搜索，原子校验；实际 PDA 改变才清图，宽根或等效固定参照变化保留搜索；保留棋谱和分析开关。 |
 | `genmove` | `color` | 按服务的搜索预算选择并直接落子，返回完整快照；前端不传预算，超时为 50 秒，可取消。 |
 | `variation` | `index`、当前 `generation` | 只读取该候选点已有变化，返回下述 PV 对象，不启动新推理。 |
 | `cancel` | `requestId`，被取消的请求 ID | 尽力停止原请求；该消息拥有新的 `id`，不含 `sessionId`，前端不等待其响应。 |
@@ -126,7 +129,7 @@ SGF 导入成功后，前端继续发送 `seek {position:0}` 回到空枰，期�
 | `boardSize:19`、`board` | 361 项一维数组，`0` 空、`1` 黑、`2` 白，表示当前 `position`。 |
 | `moves`、`position` | 完整主线及当前手数；`position` 是 `0..moves.length` 的整数。历史帧由主线回放，当前帧由服务棋盘覆盖。 |
 | `toPlay`、`captures` | 当前行棋方，以及 `{black,white}` 两方累计提子数。 |
-| `settings` | `{komi,rules}`；当前支持 `rules:"chinese"`。 |
+| `settings` | `{komi,rules,search}`；当前支持 `rules:"chinese"`；search 见下述参数契约。 |
 | `terminal` | 可省略或为 `null`；任何非空值都会显示“棋局已结束”，其内部结构不被读取。结束后操作是否合法仍须服务校验。 |
 | `analysis` | 分析状态及结果；无结果时使用下述空值结构。 |
 
@@ -166,3 +169,19 @@ SGF 导入成功后，前端继续发送 `seek {position:0}` 回到空枰，期�
 连接关闭会拒绝全部未完成请求，保留最后一份棋局快照并禁用修改。默认每隔约 1 秒尝试重连，再通过 `open` 同步状态；未完成的落子、导入、AI 落子等请求不会自动重发。无效 JSON 会显示协议错误；未关联到待处理请求的响应会被忽略。
 
 实现依据：[连接与过滤](../src/engine-connection.js)、[会话适配](../src/engine-session.js)、[界面操作](../src/main.js)、[悬停请求](../src/variation-api.js)、[棋盘与 PV 回放](../src/board-view.js)。对应的 `*.test.js` 及 [浏览器夹具](../scripts/browser_smoke.py) 覆盖请求关联、恢复、取消、过期过滤和主要显示行为；本文件不定义服务内部规则实现、搜索预算或完整错误码集合。
+
+## 搜索参数契约
+
+快照 `settings.search` 返回实际参数，例如：
+
+```json
+{"playoutDoublingAdvantage":1,"playoutDoublingAdvantagePla":"black","wideRootNoise":0.04}
+```
+
+`playoutDoublingAdvantage` 是 −3～3 的有限数值，默认0。正值假设参照方具有约 `2^PDA` 倍搜索量的棋力预期，负值相反，不改变实际算力预算。`playoutDoublingAdvantagePla` 为 `root`（当前搜索根的行棋方，默认）、`black` 或 `white`。`wideRootNoise` 是0～5的有限数值，默认0；越大越广泛探索当前局面的候选，可从0.04开始。这是实际搜索参数，与候选点显示比例不同。
+
+前端将关闭项发送为0。首次开启默认固定打开设置时的行棋颜色（black/white）；已启用的显式 root 选项不被偷偷改写，界面提示逐手换方会重算。Server 原子验证整个 `search` 对象，拒绝未知字段、非法类型和越界值；允许部分更新。实际变化取消旧代任务和挂起的 AI 落子并递增 generation；仅有效 PDA 输入改变才清图，宽根及等效固定参照变化保留搜索。保持棋谱和持续分析开关，清除旧分析预算。相同参数不应重置搜索。
+
+可选 `analysis.rootChange.reuse_reason` 与 `retained_visits/retained_nodes` 用于显示换根时立即继承的访问量和节点，或 PDA 参照改变、PDA 数值改变、上下文改变、局面未搜索、预算裁剪的具体原因。继承量是换根时刻的值，不是新的累计访问量。旧 Server 缺少原因字段时隐藏提示。
+
+前端只在收到服务快照后显示生效值，改变参数时清空旧参数的本页胜率曲线。参数属于 Server 会话，刷新、短暂断线、落子及清枰后保留；不随 SGF 保存，也不跨 Server 重启持久化。设置弹窗绑定打开时的会话与 generation，过期修改应被拒绝。没有 `settings.search` 的旧 Server 会使应用按钮禁用并显示升级提示。
